@@ -72,11 +72,12 @@ def main():
             total += min(dist[ln][int(iy), int(ix)], 15) ** 2
         return total / len(pts)
 
-    # coarse grid over scale and offset, then refine
+    # coarse grid over scale and offset, then refine (works for any copy of the map: scale ~ width / 1700)
     best = None
-    for s in np.linspace(0.28, 0.36, 17):
-        for tx in range(-40, 41, 4):
-            for ty in range(-80, 21, 4):
+    k = W / 554
+    for s in np.linspace(0.28, 0.36, 17) * k:
+        for tx in np.arange(-40, 41, 4) * k:
+            for ty in np.arange(-80, 21, 4) * k:
                 c = cost((s, tx, ty))
                 if best is None or c < best[0]:
                     best = (c, (s, tx, ty))
@@ -113,7 +114,20 @@ def main():
     for a, b in (('TE9', 'TE11'), ('TE20', 'TE22'), ('TE22', 'TE23')):
         edges[f'{a}|{b}'] = trace(near_line['TE'], to_img(*snapped[a]), to_img(*snapped[b]), to_map)
 
-    json.dump({'scale': s, 'tx': tx, 'ty': ty, 'codes': snapped, 'edges': edges},
+    # the map itself: header and legend cropped off, sea and island background made transparent
+    k = W / 554
+    x0, y0, x1, y1 = int(4 * k), int(59 * k), int(550 * k), int(446 * k)
+    crop = img[y0:y1, x0:x1].astype(int)
+    bg = np.array([[216, 236, 244], [252, 252, 252]])
+    d = np.sqrt(((crop[:, :, None, :] - bg[None, None]) ** 2).sum(3)).min(2)
+    alpha = np.clip((d - 10) * 255 / 34, 0, 255).astype(np.uint8)  # soft edge so text stays anti-aliased
+    out = Image.fromarray(np.dstack([crop.astype(np.uint8), alpha]))
+    out = out.resize((out.width * 2, out.height * 2), Image.LANCZOS)  # smoother edges when scaled up
+    out.save(ROOT / 'assets/system-map.png', optimize=True)
+    mx, my = to_map(x0, y0)
+    image = {'x': round(mx, 1), 'y': round(my, 1), 'w': round((x1 - x0) / s, 1), 'h': round((y1 - y0) / s, 1)}
+
+    json.dump({'scale': s, 'tx': tx, 'ty': ty, 'image': image, 'codes': snapped, 'edges': edges},
               open(ROOT / 'data/map_layout.json', 'w'), indent=1)
 
     # overlay: our traced lines and stations on the reference, to check by eye

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import Svg, { Circle, G, Path, Text as SvgText } from 'react-native-svg';
+import { Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import Svg, { Circle, G, Path, Rect } from 'react-native-svg';
 import { ArrowRight, MagnifyingGlassMinus, MagnifyingGlassPlus, X } from 'phosphor-react-native';
 import { Btn, C, CARD_COLORS, IconBtn, base, outline } from './ui';
-import { EDGES, LINES, STATIONS } from './mrt';
+import { EDGES, LINES, MAP_IMAGE, STATIONS } from './mrt';
 import { TRANSFER_MIN, fareCents, findRoute } from './route';
 
 const lineColour = (id) => LINES[id === 'CG' ? 'EW' : id]?.colour ?? C.grey;
@@ -97,53 +97,25 @@ function Stat({ color, big, small }) {
   );
 }
 
-// map frame in map units, with room above and to the right for the slanted names
-const X0 = 40;
-const Y0 = -50;
-const VIEW_W = 1860;
-const VIEW_H = 1110;
-const LABELS_FROM = 1100; // map width (px) from which every station name is readable
-const DOT_R = 11; // one dot size for every station, the interchange size
-// Each name goes on the first side (right, below, above, left) that no line leaves the station from.
-const NEIGHBOURS = {};
-for (const [a, b] of EDGES) { (NEIGHBOURS[a] ??= []).push(b); (NEIGHBOURS[b] ??= []).push(a); }
-const SIDES = [['right', 1, 0], ['below', 0, 1], ['above', 0, -1], ['left', -1, 0]];
-const LABEL_SIDE = Object.fromEntries(NAMES.map((n) => {
-  const st = STATIONS[n];
-  const dirs = NEIGHBOURS[n].map((o) => {
-    const dx = STATIONS[o].x - st.x;
-    const dy = STATIONS[o].y - st.y;
-    const len = Math.hypot(dx, dy) || 1;
-    return [dx / len, dy / len];
-  });
-  const free = SIDES.find(([, sx, sy]) => dirs.every(([dx, dy]) => dx * sx + dy * sy < 0.7)); // nothing within ~45 deg
-  return [n, (free ?? SIDES[0])[0]];
-}));
-function labelAt(side, st, gap, size) {
-  if (side === 'below') return { x: st.x, y: st.y + gap + size * 0.75, textAnchor: 'middle' };
-  if (side === 'above') return { x: st.x, y: st.y - gap, textAnchor: 'middle' };
-  if (side === 'left') return { x: st.x - gap, y: st.y + size * 0.35, textAnchor: 'end' };
-  return { x: st.x + gap, y: st.y + size * 0.35, textAnchor: 'start' };
-}
-
+// LTA's system map as the base, with our tap points and route drawn over it in the same map units
+const MAP_SRC = require('./assets/system-map.png');
+const LABELS_FROM = 1100; // map width (px) from which the map's station names are readable
+const TAP_R = 16; // map units; invisible tap target on each station
 function SystemMap({ route, from, to, onPick }) {
   const hRef = useRef(null);
   const vRef = useRef(null);
   const [boxW, setBoxW] = useState(0);
-  // zoom steps are map widths in px; opens at the first one where all names are readable
+  // zoom steps are map widths in px; opens at the first one where the names are readable
   const widths = [...new Set([boxW, LABELS_FROM, 1600, 2400].filter((w) => w >= boxW))];
   const [zi, setZi] = useState(null);
   const z = zi ?? Math.max(0, widths.findIndex((w) => w >= LABELS_FROM));
   const mapW = widths[Math.min(z, widths.length - 1)] || 0;
+  const mapH = (mapW * MAP_IMAGE.h) / MAP_IMAGE.w;
   const pans = mapW > boxW + 1;
-  const allLabels = mapW >= LABELS_FROM;
-  const perUnit = mapW / VIEW_W; // screen px per map unit
-  const label = (px) => px / perUnit;
+  const perUnit = mapW / MAP_IMAGE.w; // screen px per map unit
   // keyed by line too: some station pairs are linked by two lines (Raffles Place - City Hall)
   const hopKey = (a, b, line) => `${[a, b].sort().join('|')}|${line}`;
   const onRoute = useMemo(() => new Set(route?.hops.map((h) => hopKey(h.from, h.to, h.line))), [route]);
-  const routeStations = new Set(route?.stations);
-  const fade = route ? 0.25 : 1;
   // when zoomed in, open on the route (or the city centre) instead of the far west
   useEffect(() => {
     if (!pans) return;
@@ -151,8 +123,8 @@ function SystemMap({ route, from, to, onPick }) {
     const c = pts.length ? pts : [STATIONS['City Hall']];
     const cx = c.reduce((t, p) => t + p.x, 0) / c.length;
     const cy = c.reduce((t, p) => t + p.y, 0) / c.length;
-    hRef.current?.scrollTo({ x: Math.max(0, (cx - X0) * perUnit - boxW / 2), animated: !!pts.length });
-    vRef.current?.scrollTo({ y: Math.max(0, (cy - Y0) * perUnit - 260), animated: !!pts.length });
+    hRef.current?.scrollTo({ x: Math.max(0, (cx - MAP_IMAGE.x) * perUnit - boxW / 2), animated: !!pts.length });
+    vRef.current?.scrollTo({ y: Math.max(0, (cy - MAP_IMAGE.y) * perUnit - 260), animated: !!pts.length });
   }, [mapW, from, to]);
   return (
     <View style={[base.card, { backgroundColor: C.paper, padding: 0, overflow: 'hidden' }]}
@@ -160,50 +132,37 @@ function SystemMap({ route, from, to, onPick }) {
       <ScrollView ref={hRef} horizontal scrollEnabled={pans} style={{ maxHeight: pans ? 520 : undefined }}>
         <ScrollView ref={vRef} nestedScrollEnabled scrollEnabled={pans}>
           {mapW > 0 && (
-            <Svg width={mapW} height={(mapW * VIEW_H) / VIEW_W} viewBox={`${X0} ${Y0} ${VIEW_W} ${VIEW_H}`}>
-              {/* black casing under every line, then the colour on top, like the cards' outlines */}
-              <G opacity={fade}>
-                {EDGES.map((e, i) => (
-                  <Path key={i} d={e[5]} stroke={C.ink} strokeWidth={22} fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                ))}
-                {EDGES.map((e, i) => (
-                  <Path key={`c${i}`} d={e[5]} stroke={lineColour(e[2])} strokeWidth={14} fill="none" strokeLinecap="round"
-                    strokeLinejoin="round" />
-                ))}
-              </G>
-              {route && (
-                <G>
-                  {EDGES.filter((e) => onRoute.has(hopKey(e[0], e[1], e[2]))).map((e) => (
-                    <G key={`${e[0]}|${e[1]}|${e[2]}`}>
-                      <Path d={e[5]} stroke={C.ink} strokeWidth={26} fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                      <Path d={e[5]} stroke={lineColour(e[2])} strokeWidth={17} fill="none" strokeLinecap="round"
-                        strokeLinejoin="round" />
-                    </G>
-                  ))}
-                </G>
-              )}
-              {NAMES.map((n) => {
-                const st = STATIONS[n];
-                const inter = st.codes.length > 1;
-                const lit = !route || routeStations.has(n);
-                const end = n === from || n === to;
-                const named = end || allLabels || (route && lit && inter);
-                const size = end ? Math.max(15, label(13)) : 15;
-                return (
-                  <G key={n} opacity={lit ? 1 : 0.35}>
-                    {/* every dot the same size; the start and end stand out by colour */}
-                    <Circle cx={st.x} cy={st.y} r={DOT_R} fill={end ? C.butter : C.paper} stroke={C.ink} strokeWidth={4} />
-                    {named && (
-                      <SvgText {...labelAt(LABEL_SIDE[n], st, DOT_R + 6, size)} fontSize={size}
-                        fontFamily="SpaceGrotesk_700Bold" fill={C.ink}
-                        stroke={C.paper} strokeWidth={size / 4} paintOrder="stroke">{n}</SvgText>
-                    )}
-                    {/* bigger invisible target so stations are easy to tap at any zoom */}
-                    <Circle cx={st.x} cy={st.y} r={Math.max(12, label(14))} fill="transparent" onPress={() => onPick(n)} />
+            <View style={{ width: mapW, height: mapH }}>
+              <Image source={MAP_SRC} style={{ width: mapW, height: mapH }} resizeMode="stretch"
+                accessibilityLabel="MRT system map" />
+              <Svg style={StyleSheet.absoluteFill} width={mapW} height={mapH}
+                viewBox={`${MAP_IMAGE.x} ${MAP_IMAGE.y} ${MAP_IMAGE.w} ${MAP_IMAGE.h}`}>
+                {route && (
+                  <G>
+                    {/* soften the rest of the map, then draw the trip on top */}
+                    <Rect x={MAP_IMAGE.x} y={MAP_IMAGE.y} width={MAP_IMAGE.w} height={MAP_IMAGE.h} fill={C.paper} opacity={0.65} />
+                    {EDGES.filter((e) => onRoute.has(hopKey(e[0], e[1], e[2]))).map((e) => (
+                      <G key={`${e[0]}|${e[1]}|${e[2]}`}>
+                        <Path d={e[5]} stroke={C.ink} strokeWidth={22} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                        <Path d={e[5]} stroke={lineColour(e[2])} strokeWidth={14} fill="none" strokeLinecap="round"
+                          strokeLinejoin="round" />
+                      </G>
+                    ))}
+                    {route.stations.map((n) => (
+                      <Circle key={n} cx={STATIONS[n].x} cy={STATIONS[n].y} r={8} fill={C.paper} stroke={C.ink} strokeWidth={3.5} />
+                    ))}
                   </G>
-                );
-              })}
-            </Svg>
+                )}
+                {[from, to].filter(Boolean).map((n) => (
+                  <Circle key={`end-${n}`} cx={STATIONS[n].x} cy={STATIONS[n].y} r={13} fill={C.butter}
+                    stroke={C.ink} strokeWidth={5} />
+                ))}
+                {NAMES.map((n) => (
+                  <Circle key={n} cx={STATIONS[n].x} cy={STATIONS[n].y} r={Math.max(TAP_R, 14 / perUnit)}
+                    fill="transparent" onPress={() => onPick(n)} />
+                ))}
+              </Svg>
+            </View>
           )}
         </ScrollView>
       </ScrollView>
