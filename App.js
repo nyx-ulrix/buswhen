@@ -12,6 +12,7 @@ import MrtPage from './MrtPage';
 const BUS_COLORS = [C.coral, C.sky, C.lime]; // arriving bus, 2nd, 3rd
 const BAR_WINDOW_MIN = 30; // a bus fills its bar from 30 min out to 0
 const STOPS_URL = 'https://data.busrouter.sg/v1/stops.min.json';
+const SERVICES_URL = 'https://data.busrouter.sg/v1/services.min.json';
 const ARRIVALS_URL = 'https://arrivelah2.busrouter.sg/?id=';
 const STORE_KEY = 'buswhen.saved';
 // Sized so a half-width tile on a 360px phone fits 3 bars: (360-32-12)/2 = 158 >= 3*38 + 2*8 + CARD_PAD
@@ -56,6 +57,24 @@ function useStops() {
       .catch(() => setStops([]));
   }, []);
   return stops;
+}
+
+// Which bus services stop at each stop, from the published routes: { stopCode: [serviceNo] }
+function useStopServices() {
+  const [at, setAt] = useState(null);
+  useEffect(() => {
+    fetch(SERVICES_URL)
+      .then((r) => r.json())
+      .then((d) => {
+        const m = {};
+        for (const [no, { routes }] of Object.entries(d)) {
+          for (const stop of routes.flat()) (m[stop] ??= new Set()).add(no);
+        }
+        setAt(Object.fromEntries(Object.entries(m).map(([k, v]) => [k, [...v]])));
+      })
+      .catch(() => {}); // without it, only buses with live timings show
+  }, []);
+  return at;
 }
 
 // Polls every stop in `codes` once a second, straight from the phone.
@@ -341,21 +360,14 @@ function BusPage() {
   const visibleCodes = openCode && !isSaved(openCode) ? [openCode, ...savedCodes] : savedCodes;
   const arrivals = useArrivals(visibleCodes);
 
-  // Services seen at each saved stop are remembered (on the phone, with the stop), so a bus with
-  // no timing right now still shows as an empty bar instead of disappearing.
-  useEffect(() => {
-    const live = (st) => (Array.isArray(arrivals[st.code]) ? arrivals[st.code].map((s) => s.no) : []);
-    if (!saved.some((st) => live(st).some((n) => !(st.known ?? []).includes(n)))) return;
-    updateSaved((p) => p.map((st) => (live(st).some((n) => !(st.known ?? []).includes(n))
-      ? { ...st, known: [...new Set([...(st.known ?? []), ...live(st)])] } : st)));
-  }, [arrivals]);
+  const routes = useStopServices();
+  // every bus that serves the stop is shown; one with no timing right now is an empty bar
   const servicesAt = (code) => {
     const list = arrivals[code];
     if (!Array.isArray(list)) return list; // still loading, or an error
-    const st = isSaved(code);
-    const missing = [...new Set([...(st?.known ?? []), ...(st?.services ?? [])])]
+    const missing = [...new Set([...(routes?.[code] ?? []), ...(isSaved(code)?.services ?? [])])]
       .filter((no) => !list.some((s) => s.no === no));
-    return [...list, ...missing.map((no) => ({ no }))]; // no timings: drawn as an empty bar
+    return [...list, ...missing.map((no) => ({ no }))];
   };
 
   const removeStop = (code) => updateSaved((p) => p.filter((st) => st.code !== code));
