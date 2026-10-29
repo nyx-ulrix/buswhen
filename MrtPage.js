@@ -103,20 +103,28 @@ const Y0 = -50;
 const VIEW_W = 1860;
 const VIEW_H = 1110;
 const LABELS_FROM = 1100; // map width (px) from which every station name is readable
-// Names slant up to the right like Japanese rail maps. On lines that themselves run up-right
-// they slant down-right instead, across the line, so neighbouring names don't stack.
+// Each name goes on the first side (right, below, above, left) that no line leaves the station from.
 const NEIGHBOURS = {};
 for (const [a, b] of EDGES) { (NEIGHBOURS[a] ??= []).push(b); (NEIGHBOURS[b] ??= []).push(a); }
-const LABEL_ANGLE = Object.fromEntries(NAMES.map((n) => {
+const SIDES = [['right', 1, 0], ['below', 0, 1], ['above', 0, -1], ['left', -1, 0]];
+const LABEL_SIDE = Object.fromEntries(NAMES.map((n) => {
   const st = STATIONS[n];
-  const upRight = NEIGHBOURS[n].filter((o) => {
+  const dirs = NEIGHBOURS[n].map((o) => {
     const dx = STATIONS[o].x - st.x;
     const dy = STATIONS[o].y - st.y;
-    return Math.abs(dx) > 5 && Math.abs(dy) > 5 && Math.sign(dx) !== Math.sign(dy)
-      && Math.abs(Math.abs(dy / dx) - 1) < 0.6; // roughly 45 degrees, rising to the right
+    const len = Math.hypot(dx, dy) || 1;
+    return [dx / len, dy / len];
   });
-  return [n, upRight.length === NEIGHBOURS[n].length ? 40 : -40];
+  const free = SIDES.find(([, sx, sy]) => dirs.every(([dx, dy]) => dx * sx + dy * sy < 0.7)); // nothing within ~45 deg
+  return [n, (free ?? SIDES[0])[0]];
 }));
+function labelAt(side, st, gap, size) {
+  if (side === 'below') return { x: st.x, y: st.y + gap + size * 0.75, textAnchor: 'middle' };
+  if (side === 'above') return { x: st.x, y: st.y - gap, textAnchor: 'middle' };
+  if (side === 'left') return { x: st.x - gap, y: st.y + size * 0.35, textAnchor: 'end' };
+  return { x: st.x + gap, y: st.y + size * 0.35, textAnchor: 'start' };
+}
+
 function SystemMap({ route, from, to, onPick }) {
   const hRef = useRef(null);
   const vRef = useRef(null);
@@ -155,10 +163,10 @@ function SystemMap({ route, from, to, onPick }) {
               {/* black casing under every line, then the colour on top, like the cards' outlines */}
               <G opacity={fade}>
                 {LINE_PATHS.map(([, d], i) => (
-                  <Path key={i} d={d} stroke={C.ink} strokeWidth={15} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                  <Path key={i} d={d} stroke={C.ink} strokeWidth={22} fill="none" strokeLinecap="round" strokeLinejoin="round" />
                 ))}
                 {LINE_PATHS.map(([line, d], i) => (
-                  <Path key={`c${i}`} d={d} stroke={lineColour(line)} strokeWidth={9} fill="none" strokeLinecap="round"
+                  <Path key={`c${i}`} d={d} stroke={lineColour(line)} strokeWidth={14} fill="none" strokeLinecap="round"
                     strokeLinejoin="round" />
                 ))}
               </G>
@@ -166,8 +174,8 @@ function SystemMap({ route, from, to, onPick }) {
                 <G>
                   {EDGES.filter((e) => onRoute.has(hopKey(e[0], e[1], e[2]))).map((e) => (
                     <G key={`${e[0]}|${e[1]}|${e[2]}`}>
-                      <Path d={e[5]} stroke={C.ink} strokeWidth={19} fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                      <Path d={e[5]} stroke={lineColour(e[2])} strokeWidth={12} fill="none" strokeLinecap="round"
+                      <Path d={e[5]} stroke={C.ink} strokeWidth={26} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                      <Path d={e[5]} stroke={lineColour(e[2])} strokeWidth={17} fill="none" strokeLinecap="round"
                         strokeLinejoin="round" />
                     </G>
                   ))}
@@ -182,11 +190,10 @@ function SystemMap({ route, from, to, onPick }) {
                 const size = end ? Math.max(15, label(13)) : 15;
                 return (
                   <G key={n} opacity={lit ? 1 : 0.35}>
-                    <Circle cx={st.x} cy={st.y} r={end ? 13 : inter ? 9 : 6} fill={end ? C.butter : C.paper}
-                      stroke={C.ink} strokeWidth={end ? 5 : 3.5} />
+                    <Circle cx={st.x} cy={st.y} r={end ? 15 : inter ? 11 : 7} fill={end ? C.butter : C.paper}
+                      stroke={C.ink} strokeWidth={end ? 5 : 4} />
                     {named && (
-                                            <SvgText x={st.x + (end ? 18 : 11)} y={st.y + size * 0.35} fontSize={size}
-                        transform={`rotate(${LABEL_ANGLE[n]} ${st.x} ${st.y})`}
+                                            <SvgText {...labelAt(LABEL_SIDE[n], st, end ? 20 : 15, size)} fontSize={size}
                         fontFamily="SpaceGrotesk_700Bold" fill={C.ink}
                         stroke={C.paper} strokeWidth={size / 4} paintOrder="stroke">{n}</SvgText>
                     )}

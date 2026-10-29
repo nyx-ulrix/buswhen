@@ -66,8 +66,8 @@ POS = {
 Y_SHIFT = 260  # the map's top margin, trimmed
 
 
-RDP_TOLERANCE = 14  # bends smaller than this (map units) are hand-placement noise, not real corners
-CORNER_R = 28  # rounded corner radius, like the system map's curves
+RDP_TOLERANCE = 22  # bends smaller than this (map units) are hand-placement noise, not real corners
+CORNER_R = 70  # rounded corner radius, like the system map's sweeping curves
 
 
 def rdp(pts, tol):
@@ -97,35 +97,46 @@ def project(p, poly):
     return best[1], best[2]
 
 
-def rounded(poly, r=CORNER_R):
-    """svg path through the polyline with circular-ish rounded corners"""
+def round_corners(poly, pinned, r=CORNER_R, steps=12):
+    """Points along the polyline with each corner replaced by a curve. Corners at pinned points
+    (interchanges) stay sharp so every line through an interchange really passes through it."""
     poly = [p for i, p in enumerate(poly) if i == 0 or math.dist(p, poly[i - 1]) > 0.5]  # drop repeats
-    f = lambda v: f'{v:.1f}'.rstrip('0').rstrip('.')
-    d = f'M{f(poly[0][0])} {f(poly[0][1])}'
+    out = [poly[0]]
     for p, v, n in zip(poly, poly[1:], poly[2:]):
+        if v in pinned:
+            out.append(v)
+            continue
         lp, ln = math.dist(p, v), math.dist(v, n)
         rr = min(r, lp / 2, ln / 2)
         a = (v[0] + (p[0] - v[0]) * rr / lp, v[1] + (p[1] - v[1]) * rr / lp)
         b = (v[0] + (n[0] - v[0]) * rr / ln, v[1] + (n[1] - v[1]) * rr / ln)
-        d += f'L{f(a[0])} {f(a[1])}Q{f(v[0])} {f(v[1])} {f(b[0])} {f(b[1])}'
-    return d + f'L{f(poly[-1][0])} {f(poly[-1][1])}'
+        for k in range(steps + 1):  # quadratic curve a -> b with v as control
+            t = k / steps
+            out.append(((1 - t) ** 2 * a[0] + 2 * (1 - t) * t * v[0] + t * t * b[0],
+                        (1 - t) ** 2 * a[1] + 2 * (1 - t) * t * v[1] + t * t * b[1]))
+    out.append(poly[-1])
+    return out
+
+
+def svg(pts):
+    f = lambda v: f'{v:.1f}'.rstrip('0').rstrip('.')
+    return 'M' + 'L'.join(f'{f(x)} {f(y)}' for x, y in pts)
 
 
 def smooth_lines(edges, codes, stations):
-    """Straighten each line into runs between real corners and snap stations onto them.
+    """Straighten each line into runs between real corners, round the corners, and put every
+    station dot exactly on its line. Interchanges are pinned: all their lines pass through them.
     Updates station x/y in place; returns (line paths, {edge: path along the line})."""
-    line_code = {}  # (station, line) -> that line's code at the station, for its map position
-    for n, cs in codes.items():
-        for c in cs:
-            pre = c.rstrip('0123456789A')
-            line_code[(n, {'CE': 'CC'}.get(pre, pre))] = c
-    pos_on = lambda n, line: POS.get(line_code.get((n, line)) or line_code.get((n, 'EW' if line == 'CG' else line)),
-                                     (stations[n]['x'], stations[n]['y'] + Y_SHIFT))
-
-    per_line = {}
+    per_line, lines_at = {}, {}
     for a, b, line, _ in edges:
         per_line.setdefault(line, []).append((a, b))
-    line_paths, edge_paths, snapped = [], {}, {}
+        for n in (a, b):
+            lines_at.setdefault(n, set()).add(line)
+    pin = {n for n, ls in lines_at.items() if len(ls) > 1}
+    at = lambda n: (stations[n]['x'], stations[n]['y'])
+    pinned = {at(n) for n in pin}
+
+    line_paths, edge_paths, moved = [], {}, {}
     for line, es in per_line.items():
         adj = {}
         for a, b in es:
@@ -148,29 +159,33 @@ def smooth_lines(edges, codes, stations):
                     chain.append(step)
                 chains.append(chain)
         for chain in chains:
-            raw = [pos_on(n, line) for n in chain]
-            raw = [(x, y - Y_SHIFT) for x, y in raw]
-            poly = rdp(raw, RDP_TOLERANCE)
-            line_paths.append([line, rounded(poly)])
+            raw = [at(n) for n in chain]
+            # simplify between pinned stations so the line can't drift off an interchange
+            cuts = [0] + [i for i, n in enumerate(chain[1:-1], 1) if n in pin] + [len(chain) - 1]
+            poly = [raw[0]]
+            for i, j in zip(cuts, cuts[1:]):
+                poly += rdp(raw[i:j + 1], RDP_TOLERANCE)[1:]
+            curve = round_corners(poly, pinned)
+            line_paths.append([line, svg(curve)])
             along = {}
             for n, p in zip(chain, raw):
-                q, t = project(p, poly)
-                along[n] = t
-                snapped.setdefault(n, []).append(q)
-            # each edge's piece of the run: its two stations plus any corners between them
-            cum, corners = 0.0, []
-            for u, v in zip(poly, poly[1:]):
-                corners.append((cum, u))
-                cum += math.dist(u, v)
+                q, t = project(p, curve)
+                along[n] = (t, q if n not in pin else p)
+                if n not in pin:
+                    moved[n] = q
+            # each edge's piece of the curve between its two stations
+            cum = [0.0]
+            for u, v in zip(curve, curve[1:]):
+                cum.append(cum[-1] + math.dist(u, v))
             for u, v in zip(chain, chain[1:]):
-                t0, t1 = sorted((along[u], along[v]))
-                pts = [project(raw[chain.index(u)], poly)[0]]
-                pts += [c for t, c in corners if t0 < t < t1][:: 1 if along[u] <= along[v] else -1]
-                pts.append(project(raw[chain.index(v)], poly)[0])
-                edge_paths[(u, v, line)] = edge_paths[(v, u, line)] = rounded(pts, CORNER_R / 2)
-    for n, qs in snapped.items():
-        stations[n]['x'] = round(sum(q[0] for q in qs) / len(qs), 1)
-        stations[n]['y'] = round(sum(q[1] for q in qs) / len(qs), 1)
+                (t0, p0), (t1, p1) = along[u], along[v]
+                lo, hi = sorted((t0, t1))
+                mid = [c for c, t in zip(curve, cum) if lo < t < hi]
+                if t0 > t1:
+                    mid.reverse()
+                edge_paths[(u, v, line)] = edge_paths[(v, u, line)] = svg([p0, *mid, p1])
+    for n, q in moved.items():
+        stations[n]['x'], stations[n]['y'] = round(q[0], 1), round(q[1], 1)
     return line_paths, edge_paths
 
 
