@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Asset } from 'expo-asset';
 import Svg, { Circle, Defs, Image as SvgImage, Mask, Path, Rect } from 'react-native-svg';
@@ -119,33 +119,52 @@ function SystemMap({ route, from, to, onPick }) {
   const clampW = (w) => Math.min(MAX_W, Math.max(minW, w));
   const mapW = boxW ? clampW(zw ?? Math.max(boxW, LABELS_FROM)) : 0;
   const mapH = mapW * aspect;
+  const contentRef = useRef(null);
   const scroll = useRef({ x: 0, y: 0 });
   const pinch = useRef(null);
+  const nextScroll = useRef(null); // where to scroll once the map has been laid out at its new size
   const dist = (t) => Math.hypot(t[0].pageX - t[1].pageX, t[0].pageY - t[1].pageY);
   // zoom to newW keeping the map point at (vx, vy) in the visible box where it is
   const zoomTo = (newW, vx, vy, from = { w: mapW, ...scroll.current }) => {
-    const w = clampW(newW);
-    const f = w / from.w;
-    setZw(w);
-    requestAnimationFrame(() => {
-      hRef.current?.scrollTo({ x: Math.max(0, (from.x + vx) * f - vx), animated: false });
-      vRef.current?.scrollTo({ y: Math.max(0, (from.y + vy) * f - vy), animated: false });
-    });
+    const f = clampW(newW) / from.w;
+    nextScroll.current = { x: Math.max(0, (from.x + vx) * f - vx), y: Math.max(0, (from.y + vy) * f - vy) };
+    setZw(clampW(newW));
   };
+  useLayoutEffect(() => {
+    const s = nextScroll.current;
+    if (!s) return;
+    nextScroll.current = null;
+    hRef.current?.scrollTo({ x: s.x, animated: false });
+    vRef.current?.scrollTo({ y: s.y, animated: false });
+  }, [mapW]);
+  // While pinching, the map is only scaled on the GPU around the fingers (no re-render), so it
+  // follows smoothly; on release it is laid out once at the new size and scrolled to match.
+  const content = () => contentRef.current?.style; // the DOM node on the web
   const onTouchStart = (e) => {
     const t = e.nativeEvent.touches;
-    if (t.length !== 2) return;
-    const start = { d: dist(t), w: mapW, ...scroll.current, px: (t[0].pageX + t[1].pageX) / 2, py: (t[0].pageY + t[1].pageY) / 2 };
-    pinch.current = start;
-    boxRef.current?.measureInWindow((bx, by) => { start.bx = bx; start.by = by; });
+    const box = boxRef.current?.getBoundingClientRect?.();
+    if (t.length !== 2 || !box || !content()) return;
+    const vx = (t[0].pageX + t[1].pageX) / 2 - box.left - window.scrollX;
+    const vy = (t[0].pageY + t[1].pageY) / 2 - box.top - window.scrollY;
+    pinch.current = { d: dist(t), w: mapW, ...scroll.current, vx, vy, r: 1 };
+    content().transformOrigin = `${scroll.current.x + vx}px ${scroll.current.y + vy}px`;
+    content().willChange = 'transform';
   };
   const onTouchMove = (e) => {
     const t = e.nativeEvent.touches;
     const p = pinch.current;
-    if (!p || t.length !== 2 || p.bx == null) return;
-    zoomTo(p.w * (dist(t) / p.d), p.px - p.bx, p.py - p.by, p);
+    if (!p || t.length !== 2) return;
+    p.r = clampW(p.w * (dist(t) / p.d)) / p.w;
+    content().transform = `scale(${p.r})`;
   };
-  const onTouchEnd = (e) => { if (e.nativeEvent.touches.length < 2) pinch.current = null; };
+  const onTouchEnd = (e) => {
+    const p = pinch.current;
+    if (!p || e.nativeEvent.touches.length >= 2) return;
+    pinch.current = null;
+    content().transform = '';
+    content().willChange = '';
+    if (p.r !== 1) zoomTo(p.w * p.r, p.vx, p.vy, p);
+  };
   const pans = mapW > boxW + 1 || mapH > boxH + 1;
   const perUnit = mapW / MAP_IMAGE.w; // screen px per map unit
   // keyed by line too: some station pairs are linked by two lines (Raffles Place - City Hall)
@@ -172,13 +191,13 @@ function SystemMap({ route, from, to, onPick }) {
   const frame = { x: MAP_IMAGE.x, y: MAP_IMAGE.y, width: MAP_IMAGE.w, height: MAP_IMAGE.h };
   return (
     <View ref={boxRef} style={[base.card, m.mapBox]} onLayout={(e) => setBoxW(Math.floor(e.nativeEvent.layout.width - 5))}
-      onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
+      onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onTouchCancel={onTouchEnd}>
       <ScrollView ref={hRef} horizontal scrollEnabled={pans} style={{ height: boxH }}
         scrollEventThrottle={16} onScroll={(e) => { scroll.current.x = e.nativeEvent.contentOffset.x; }}>
         <ScrollView ref={vRef} nestedScrollEnabled scrollEnabled={pans} style={{ height: boxH }}
           scrollEventThrottle={16} onScroll={(e) => { scroll.current.y = e.nativeEvent.contentOffset.y; }}>
           {mapW > 0 && (
-            <View style={{ width: Math.max(mapW, boxW), height: Math.max(mapH, boxH), alignItems: 'center', justifyContent: 'center' }}>
+            <View ref={contentRef} style={{ width: Math.max(mapW, boxW), height: Math.max(mapH, boxH), alignItems: 'center', justifyContent: 'center' }}>
             <Svg width={mapW} height={mapH} viewBox={`${MAP_IMAGE.x} ${MAP_IMAGE.y} ${MAP_IMAGE.w} ${MAP_IMAGE.h}`}
               accessibilityLabel="MRT system map">
               {route ? (
