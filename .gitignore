@@ -46,3 +46,5 @@ graphify-out/
 # LTA's system map, used locally to measure the layout (not ours to publish)
 data/system-map.png
 data/overlay.png
+data/system-map.svg
+data/system-map-hi.png
