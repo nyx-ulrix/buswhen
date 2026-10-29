@@ -21,7 +21,6 @@ const BAR_GAP = 8;
 const BAR_SLOT = BAR_W + BAR_GAP;
 const CARD_PAD = 25; // card padding (10) + border (2.5), both sides
 const ICONS_W = 70; // pen + bookmark: two 32px buttons and a 6px gap
-const MIN_TILE = 110; // narrowest tile: one bar plus the stacked icons beside it
 // Shrinks a stop name so it fits in two lines of the tile instead of widening it.
 // ponytail: estimates glyph width (0.6em for Space Grotesk bold) and allows ~1.6 lines since
 // word wrapping wastes space; measure text if names still clip
@@ -384,8 +383,8 @@ function BusPage() {
       return p;
     });
 
-  // Bento: each tile is exactly as wide as its bars (min 3 bars, so two fit side by side on a
-  // 360px phone), packed left to right. Gaps at row ends are fine.
+  // Masonry: equal-width columns (each fits 3 bars, so a 360px phone has two), every tile goes in
+  // whichever column is shortest so far, in saved order. Gaps are the same everywhere.
   const inner = Math.floor(gridW ?? Math.min(width, 1200) - 32);
   const barsOf = (code) => {
     const list = Array.isArray(servicesAt(code)) ? servicesAt(code) : [];
@@ -394,9 +393,18 @@ function BusPage() {
   };
   // bars grow with the screen: 1x on a 360px phone, up to 1.6x on wide screens
   const k = Math.min(1.6, Math.max(1, inner / 328));
-  // as wide as the bars, but never under MIN_TILE so the name stays readable
-  const widthOf = (code) =>
-    Math.min(inner, Math.max(MIN_TILE * k, (barsOf(code) * BAR_SLOT - BAR_GAP) * k + CARD_PAD));
+  const cols = Math.max(1, Math.floor((inner + GAP) / ((3 * BAR_SLOT - BAR_GAP) * k + CARD_PAD + GAP)));
+  const colW = Math.floor((inner - GAP * (cols - 1)) / cols);
+  const widthOf = () => colW;
+  const perRow = Math.max(1, Math.floor((colW - CARD_PAD + BAR_GAP * k) / (BAR_SLOT * k)));
+  // ponytail: estimated tile height (header + rows of bars) to balance columns; measure if it drifts
+  const heightOf = (code) => 90 + Math.ceil(Math.max(1, barsOf(code)) / perRow) * (BAR_H + 34) * k;
+  const columns = Array.from({ length: cols }, () => ({ h: 0, tiles: [] }));
+  saved.forEach((st, i) => {
+    const c = columns.reduce((a, b) => (b.h < a.h ? b : a));
+    c.tiles.push([st, i]);
+    c.h += heightOf(st.code) + GAP;
+  });
 
   const card = (code, stop, i) => (
     <StopCard key={code} code={code} stop={stop} color={CARD_COLORS[i % CARD_COLORS.length]}
@@ -433,7 +441,9 @@ function BusPage() {
         </View>
       )}
       <View style={s.bento} onLayout={(e) => setGridW(e.nativeEvent.layout.width)}>
-        {saved.map((st, i) => card(st.code, st, i + 1))}
+        {columns.map((c, ci) => (
+          <View key={ci} style={s.column}>{c.tiles.map(([st, i]) => card(st.code, st, i + 1))}</View>
+        ))}
       </View>
       {editing && (
         <EditLayout saved={saved} inner={inner} widthOf={widthOf}
@@ -483,7 +493,8 @@ export default function App() {
 const outline = { borderWidth: 2.5, borderColor: C.ink };
 const s = StyleSheet.create({
   ...base,
-  bento: { flexDirection: 'row', flexWrap: 'wrap', gap: GAP, alignItems: 'flex-start' },
+  bento: { flexDirection: 'row', gap: GAP, alignItems: 'flex-start' },
+  column: { gap: GAP },
   miniGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: MINI_GAP, padding: 4, alignItems: 'flex-start' },
   miniTile: {
     borderWidth: 2, borderColor: C.ink, borderRadius: 16, padding: 8, gap: 6, minHeight: 84,
