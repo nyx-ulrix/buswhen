@@ -19,7 +19,7 @@ const ARRIVALS_URL = 'https://arrivelah2.busrouter.sg/?id=';
 const STORE_KEY = 'buswhen.saved';
 const GAP = 12;
 const BAR_SLOT = 70; // bar column width + gap between bars
-const CARD_PAD = 41; // card padding + border, both sides
+const CARD_PAD = 33; // card padding (14) + border (2.5), both sides
 const TILE_UNIT = 2 * BAR_SLOT - GAP + CARD_PAD; // grid column width: fits two bars
 
 // saved: [{ code, name, road, services: [no] }] in tile order, empty services = show all
@@ -110,10 +110,10 @@ function Flash({ on, children }) {
 // Fill heights in px, nearest bus tallest. Each fill keeps LABEL_ROOM px above the one in front
 // so the time printed at its top edge stays readable even when buses bunch up.
 const BAR_H = 170;
-const LABEL_ROOM = 22;
+const LABEL_ROOM = 26;
 function fillHeights(mins) {
   const out = [null, null, null];
-  let floor = 10; // lowest fill is at least 32px, enough for a full dome
+  let floor = 10; // lowest fill is at least 36px, enough for a full dome
   for (let i = 2; i >= 0; i--) {
     if (mins[i] == null) continue;
     const raw = (1 - mins[i] / BAR_WINDOW_MIN) * BAR_H;
@@ -136,7 +136,7 @@ function BusBar({ service }) {
           const m = mins[i];
           const fillView = (
             <View style={[s.fill, { height: h, backgroundColor: BUS_COLORS[i] }]}>
-              {m < 1 ? <Bus size={14} weight="bold" color={C.ink} /> : <Text style={s.etaText}>{Math.floor(m)}m</Text>}
+              {m < 1 ? <Bus size={14} weight="bold" color={C.ink} /> : <Text style={s.etaText}>{Math.floor(m)} min</Text>}
             </View>
           );
           return i === 0
@@ -156,20 +156,20 @@ function StopCard({ code, stop, services: raw, color, saved, style, onToggleStop
   const [picking, setPicking] = useState(false);
   return (
     <View style={[s.card, { backgroundColor: color }, style]}>
-      <View style={[s.row, { alignItems: 'flex-start', flexWrap: 'wrap' }]}>
+      <View style={[s.row, { alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }]}>
         <View style={{ flex: 1, minWidth: 100 }}>
           <Text style={s.cardTitle}>{stop.name}</Text>
           <Text style={s.caption}>{code} · {stop.road}</Text>
         </View>
-        <View style={[s.row, { gap: 8 }]}>
+        <View style={[s.row, { gap: 6 }]}>
           {saved && services.length > 0 && (
             <IconBtn active={picking} label={picking ? 'Done choosing buses' : 'Choose which buses to show'}
               onPress={() => setPicking(!picking)}>
-              <PencilSimple size={18} weight="bold" color={picking ? C.paper : C.ink} />
+              <PencilSimple size={15} weight="bold" color={picking ? C.paper : C.ink} />
             </IconBtn>
           )}
           <IconBtn label={saved ? `Remove ${stop.name} from saved` : `Save ${stop.name}`} onPress={onToggleStop}>
-            <BookmarkSimple size={18} weight={saved ? 'fill' : 'bold'} color={C.ink} />
+            <BookmarkSimple size={15} weight={saved ? 'fill' : 'bold'} color={C.ink} />
           </IconBtn>
         </View>
       </View>
@@ -287,7 +287,7 @@ function EditLayout({ saved, cols, spanOf, onClose, onReorder, onRemove }) {
 
 function IconBtn({ children, label, disabled, active, onPress }) {
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected: !!active }}
+    <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected: !!active }} hitSlop={6}
       disabled={disabled} onPress={onPress}
       style={({ pressed }) => [s.iconBtn, disabled && { opacity: 0.3 }, active && { backgroundColor: C.ink },
         pressed && { transform: [{ translateX: 2 }, { translateY: 2 }], boxShadow: 'none' }]}>
@@ -437,11 +437,11 @@ const s = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center', backgroundColor: C.paper,
   },
   iconBtn: {
-    ...outline, width: 40, height: 40, borderRadius: 999, backgroundColor: C.paper,
+    ...outline, width: 32, height: 32, borderRadius: 999, backgroundColor: C.paper,
     alignItems: 'center', justifyContent: 'center', boxShadow: `2px 2px 0 ${C.ink}`,
   },
   display: { fontFamily: 'Shrikhand_400Regular', fontSize: 44, lineHeight: 52, color: C.ink, marginTop: 16 },
-  cardTitle: { fontFamily: 'SpaceGrotesk_700Bold', fontSize: 20, color: C.ink },
+  cardTitle: { fontFamily: 'SpaceGrotesk_700Bold', fontSize: 17, lineHeight: 21, color: C.ink },
   label: { fontFamily: 'SpaceGrotesk_700Bold', fontSize: 14, color: C.ink },
   caption: { fontFamily: 'SpaceGrotesk_500Medium', fontSize: 12, color: C.ink },
   search: {
@@ -452,7 +452,7 @@ const s = StyleSheet.create({
   skeleton: { height: 170, width: 52, borderRadius: 999, borderWidth: 2.5, borderColor: C.ink, borderStyle: 'dashed', opacity: 0.4 },
   btn: { ...outline, borderRadius: 24, paddingHorizontal: 20, paddingVertical: 12, boxShadow: `4px 4px 0 ${C.ink}` },
   chip: { ...outline, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 6, boxShadow: `2px 2px 0 ${C.ink}` },
-  card: { ...outline, borderRadius: 28, padding: 18, gap: 12, boxShadow: `4px 4px 0 ${C.ink}` },
+  card: { ...outline, borderRadius: 24, padding: 14, gap: 10, boxShadow: `4px 4px 0 ${C.ink}` },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   bars: { flexDirection: 'row', flexWrap: 'wrap', gap: GAP, paddingVertical: 4 },
@@ -461,8 +461,8 @@ const s = StyleSheet.create({
   fill: {
     // full border (not just top) so the curve keeps an even line; the sides hide under the pill's clip
     position: 'absolute', bottom: 0, left: -2.5, right: -2.5, borderWidth: 2.5, borderBottomWidth: 0, borderColor: C.ink,
-    borderTopLeftRadius: 999, borderTopRightRadius: 999, alignItems: 'center', paddingTop: 3,
+    borderTopLeftRadius: 999, borderTopRightRadius: 999, alignItems: 'center', paddingTop: 7,
   },
   barNo: { fontFamily: 'Shrikhand_400Regular', fontSize: 20, color: C.ink },
-  etaText: { fontFamily: 'SpaceGrotesk_700Bold', fontSize: 12, color: C.ink },
+  etaText: { fontFamily: 'SpaceGrotesk_700Bold', fontSize: 11, letterSpacing: -0.3, color: C.ink },
 });
