@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "buswhen-tmp",
-    "slug": "buswhen-tmp",
+    "name": "Bus When?",
+    "slug": "buswhen",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -18,7 +18,14 @@
       }
     },
     "web": {
-      "favicon": "./assets/favicon.png"
-    }
+      "favicon": "./assets/favicon.png",
+      "output": "single",
+      "name": "Bus When?",
+      "themeColor": "#A98BF5",
+      "backgroundColor": "#A98BF5"
+    },
+    "plugins": [
+      "expo-font"
+    ]
   }
 }
