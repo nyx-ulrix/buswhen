@@ -24,6 +24,7 @@ const BAR_GAP = 8;
 const BAR_SLOT = BAR_W + BAR_GAP;
 const CARD_PAD = 25; // card padding (10) + border (2.5), both sides
 const ICONS_W = 70; // pen + bookmark: two 32px buttons and a 6px gap
+const MIN_TILE = 110; // narrowest tile: one bar plus the stacked icons beside it
 // Shrinks a stop name so it fits in two lines of the tile instead of widening it.
 // ponytail: estimates glyph width (0.6em for Space Grotesk bold) and allows ~1.6 lines since
 // word wrapping wastes space; measure text if names still clip
@@ -388,8 +389,9 @@ export default function App() {
   };
   // bars grow with the screen: 1x on a 360px phone, up to 1.6x on wide screens
   const k = Math.min(1.6, Math.max(1, inner / 328));
+  // as wide as the bars, but never under MIN_TILE so the name stays readable
   const widthOf = (code) =>
-    Math.min(inner, (Math.max(3, barsOf(code)) * BAR_SLOT - BAR_GAP) * k + CARD_PAD);
+    Math.min(inner, Math.max(MIN_TILE * k, (barsOf(code) * BAR_SLOT - BAR_GAP) * k + CARD_PAD));
 
   if (!fontsLoaded) return <View style={s.screen} />;
 
