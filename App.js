@@ -18,9 +18,17 @@ const STOPS_URL = 'https://data.busrouter.sg/v1/stops.min.json';
 const ARRIVALS_URL = 'https://arrivelah2.busrouter.sg/?id=';
 const STORE_KEY = 'buswhen.saved';
 const GAP = 12;
-const BAR_SLOT = 70; // bar column width + gap between bars
-const CARD_PAD = 33; // card padding (14) + border (2.5), both sides
-const TILE_UNIT = 2 * BAR_SLOT - GAP + CARD_PAD; // grid column width: fits two bars
+// Sized so a half-width tile on a 360px phone fits 3 bars: (360-32-12)/2 = 158 >= 3*38 + 2*8 + CARD_PAD
+const BAR_W = 38;
+const BAR_GAP = 8;
+const BAR_SLOT = BAR_W + BAR_GAP;
+const CARD_PAD = 25; // card padding (10) + border (2.5), both sides
+const ICONS_W = 70; // pen + bookmark: two 32px buttons and a 6px gap
+// Shrinks a stop name so it fits in two lines of the tile instead of widening it.
+// ponytail: estimates glyph width (0.6em for Space Grotesk bold) and allows ~1.6 lines since
+// word wrapping wastes space; measure text if names still clip
+const titleSize = (name, tileW, k) =>
+  Math.max(12, Math.min(17 * k, Math.floor((1.6 * (tileW - CARD_PAD)) / (name.length * 0.6))));
 
 // saved: [{ code, name, road, services: [no] }] in tile order, empty services = show all
 function useSaved() {
@@ -110,33 +118,40 @@ function Flash({ on, children }) {
 // Fill heights in px, nearest bus tallest. Each fill keeps LABEL_ROOM px above the one in front
 // so the time printed at its top edge stays readable even when buses bunch up.
 const BAR_H = 170;
-const LABEL_ROOM = 26;
-function fillHeights(mins) {
+const LABEL_ROOM = 32; // two-line label: number over "min"
+function fillHeights(mins, k) {
   const out = [null, null, null];
-  let floor = 10; // lowest fill is at least 36px, enough for a full dome
+  let floor = 10 * k; // lowest fill is at least 42px (at k=1), enough for a full dome
   for (let i = 2; i >= 0; i--) {
     if (mins[i] == null) continue;
-    const raw = (1 - mins[i] / BAR_WINDOW_MIN) * BAR_H;
-    out[i] = Math.min(BAR_H, Math.max(raw, floor + LABEL_ROOM));
+    const raw = (1 - mins[i] / BAR_WINDOW_MIN) * BAR_H * k;
+    out[i] = Math.min(BAR_H * k, Math.max(raw, floor + LABEL_ROOM * k));
     floor = out[i];
   }
   return out;
 }
 
 // One pill per service: the 3 upcoming buses as stacked fills, nearest = tallest, drawn first.
-function BusBar({ service }) {
-  const buses = [service.next, service.next2, service.next3];
+// k scales every bar dimension so bars grow with the screen.
+function BusBar({ service, k }) {
+  // the API occasionally lists a later bus first, so order by arrival time
+  const buses = [service.next, service.next2, service.next3].filter((b) => b?.time)
+    .sort((a, b) => new Date(a.time) - new Date(b.time));
   const mins = buses.map(minsUntil);
   return (
-    <View style={s.barCol} accessible
+    <View style={[s.barCol, { width: BAR_W * k }]} accessible
       accessibilityLabel={`Bus ${service.no}: ${mins.filter((m) => m != null).map((m) => (m < 1 ? 'arriving' : `${Math.floor(m)} min`)).join(', ')}`}>
-      <View style={s.bar}>
-        {fillHeights(mins).map((h, i) => {
+      <View style={[s.bar, { width: BAR_W * k, height: BAR_H * k }]}>
+        {fillHeights(mins, k).map((h, i) => {
           if (h == null) return null;
           const m = mins[i];
           const fillView = (
-            <View style={[s.fill, { height: h, backgroundColor: BUS_COLORS[i] }]}>
-              {m < 1 ? <Bus size={14} weight="bold" color={C.ink} /> : <Text style={s.etaText}>{Math.floor(m)} min</Text>}
+            <View style={[s.fill, { height: h, backgroundColor: BUS_COLORS[i], paddingTop: 7 * k }]}>
+              {m < 1 ? <Bus size={14 * k} weight="bold" color={C.ink} /> : (
+                <Text style={[s.etaText, { fontSize: 12 * k, lineHeight: 12 * k }]}>
+                  {Math.floor(m)}{'\n'}<Text style={[s.etaUnit, { fontSize: 9 * k, lineHeight: 10 * k }]}>min</Text>
+                </Text>
+              )}
             </View>
           );
           return i === 0
@@ -144,40 +159,55 @@ function BusBar({ service }) {
             : <View key={i} style={StyleSheet.absoluteFill}>{fillView}</View>;
         })}
       </View>
-      <Text style={s.barNo}>{service.no}</Text>
+      <Text style={[s.barNo, { fontSize: 16 * k, width: BAR_SLOT * k }]}>{service.no}</Text>
     </View>
   );
 }
 
-function StopCard({ code, stop, services: raw, color, saved, style, onToggleStop, onToggleService }) {
+function StopCard({ code, stop, services: raw, color, saved, tileW, k, onToggleStop, onToggleService }) {
   const services = Array.isArray(raw) ? raw : [];
   const starred = saved?.services || [];
   const shown = starred.length ? services.filter((x) => starred.includes(x.no)) : services;
   const [picking, setPicking] = useState(false);
+  // Icons sit right of the name, unless the bars leave a gap at the end of their row:
+  // then they stack in that gap and the name gets the full width.
+  const spare = tileW - CARD_PAD - (shown.length * BAR_SLOT - BAR_GAP) * k;
+  const iconsBesideBars = shown.length > 0 && spare >= 32 + BAR_GAP * k; // stacked: one button wide
+  // next to the name only if the name keeps ~110px, otherwise under the stop details
+  const iconsBesideTitle = !iconsBesideBars && tileW - CARD_PAD - ICONS_W - 8 >= 110;
+  const titleW = iconsBesideTitle ? tileW - ICONS_W - 8 : tileW;
+  const icons = (
+    <View style={[iconsBesideBars ? { alignSelf: 'flex-end', marginLeft: 'auto' } : s.row, { gap: 6 }]}>
+      {saved && services.length > 0 && (
+        <IconBtn active={picking} label={picking ? 'Done choosing buses' : 'Choose which buses to show'}
+          onPress={() => setPicking(!picking)}>
+          <PencilSimple size={15} weight="bold" color={picking ? C.paper : C.ink} />
+        </IconBtn>
+      )}
+      <IconBtn label={saved ? `Remove ${stop.name} from saved` : `Save ${stop.name}`} onPress={onToggleStop}>
+        <BookmarkSimple size={15} weight={saved ? 'fill' : 'bold'} color={C.ink} />
+      </IconBtn>
+    </View>
+  );
   return (
-    <View style={[s.card, { backgroundColor: color }, style]}>
-      <View style={[s.row, { alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }]}>
-        <View style={{ flex: 1, minWidth: 100 }}>
-          <Text style={s.cardTitle}>{stop.name}</Text>
+    <View style={[s.card, { backgroundColor: color, width: tileW }]}>
+      <View style={[s.row, { alignItems: 'flex-start', gap: 8 }]}>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={[s.cardTitle, { fontSize: titleSize(stop.name, titleW, k), lineHeight: titleSize(stop.name, titleW, k) + 4 }]}
+            numberOfLines={2}>{stop.name}</Text>
           <Text style={s.caption}>{code} · {stop.road}</Text>
         </View>
-        <View style={[s.row, { gap: 6 }]}>
-          {saved && services.length > 0 && (
-            <IconBtn active={picking} label={picking ? 'Done choosing buses' : 'Choose which buses to show'}
-              onPress={() => setPicking(!picking)}>
-              <PencilSimple size={15} weight="bold" color={picking ? C.paper : C.ink} />
-            </IconBtn>
-          )}
-          <IconBtn label={saved ? `Remove ${stop.name} from saved` : `Save ${stop.name}`} onPress={onToggleStop}>
-            <BookmarkSimple size={15} weight={saved ? 'fill' : 'bold'} color={C.ink} />
-          </IconBtn>
-        </View>
+        {iconsBesideTitle && icons}
       </View>
-      {raw === undefined && <View style={s.skeleton} />}
+      {!iconsBesideBars && !iconsBesideTitle && icons}
+      {raw === undefined && <View style={[s.skeleton, { width: BAR_W * k, height: BAR_H * k }]} />}
       {raw === 'error' && <Text style={s.caption}>Can't reach bus times. Retrying every second.</Text>}
       {Array.isArray(raw) && !raw.length && <Text style={s.caption}>No buses right now.</Text>}
       {shown.length > 0 && (
-        <View style={s.bars}>{shown.map((svc) => <BusBar key={svc.no} service={svc} />)}</View>
+        <View style={[s.bars, { gap: BAR_GAP * k }]}>
+          {shown.map((svc) => <BusBar key={svc.no} service={svc} k={k} />)}
+          {iconsBesideBars && icons}
+        </View>
       )}
       {picking && saved && services.length > 0 && (
         <Text style={s.caption}>Tap buses to show only those</Text>
@@ -199,30 +229,35 @@ function StopCard({ code, stop, services: raw, color, saved, style, onToggleStop
 }
 
 // Zoomed-out copy of the bento grid. Drag a tile onto another to move it there.
-const MINI_GAP = 6;
-function EditLayout({ saved, cols, spanOf, onClose, onReorder, onRemove }) {
+const MINI_GAP = 5; // smaller than GAP scaled down, so the preview never wraps earlier than the grid
+function EditLayout({ saved, inner, widthOf, onClose, onReorder, onRemove }) {
   const [gridW, setGridW] = useState(0);
   const [dragCode, setDragCode] = useState(null);
   const [overCode, setOverCode] = useState(null);
   const pan = useRef(new Animated.ValueXY()).current;
-  const layouts = useRef({});
+  const tileRefs = useRef({});
+  const rects = useRef({});
   const responders = useRef({});
   const live = useRef({});
   live.current = { saved, onReorder }; // responders are made once, so they read fresh values from here
 
-  // which tile is under the dragged tile's centre (nearest one if between tiles)
-  const hit = (code, dx, dy) => {
-    const a = layouts.current[code];
-    if (!a) return null;
-    const x = a.x + a.width / 2 + dx;
-    const y = a.y + a.height / 2 + dy;
+  // Tile rects are measured fresh when a drag starts: onLayout on web only fires on resize,
+  // so after a reorder of same-size tiles the stored positions would be stale.
+  const measureAll = () => {
+    for (const { code } of live.current.saved) {
+      tileRefs.current[code]?.measureInWindow((x, y, w, h) => { rects.current[code] = { x, y, w, h }; });
+    }
+  };
+  // tile under the finger, or the nearest one when the finger is in a gap
+  const hit = (px, py) => {
     let best = null;
     let bestD = Infinity;
-    for (const { code: c } of live.current.saved) {
-      const b = layouts.current[c];
-      if (!b) continue;
-      const d = (b.x + b.width / 2 - x) ** 2 + (b.y + b.height / 2 - y) ** 2;
-      if (d < bestD) { bestD = d; best = c; }
+    for (const { code } of live.current.saved) {
+      const r = rects.current[code];
+      if (!r) continue;
+      if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return code;
+      const d = (r.x + r.w / 2 - px) ** 2 + (r.y + r.h / 2 - py) ** 2;
+      if (d < bestD) { bestD = d; best = code; }
     }
     return best;
   };
@@ -230,17 +265,21 @@ function EditLayout({ saved, cols, spanOf, onClose, onReorder, onRemove }) {
   const responderFor = (code) => (responders.current[code] ??= PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onPanResponderTerminationRequest: () => false,
-    onPanResponderGrant: () => { pan.setValue({ x: 0, y: 0 }); setDragCode(code); },
-    onPanResponderMove: (_, g) => { pan.setValue({ x: g.dx, y: g.dy }); setOverCode(hit(code, g.dx, g.dy)); },
+    onPanResponderGrant: () => { measureAll(); pan.setValue({ x: 0, y: 0 }); setDragCode(code); },
+    onPanResponderMove: (_, g) => {
+      pan.setValue({ x: g.dx, y: g.dy });
+      setOverCode(hit(g.moveX, g.moveY));
+    },
     onPanResponderRelease: (_, g) => {
-      const to = hit(code, g.dx, g.dy);
+      const moved = Math.abs(g.dx) + Math.abs(g.dy) > 4;
+      const to = moved && hit(g.moveX, g.moveY);
       end();
       if (to && to !== code) live.current.onReorder(code, to);
     },
     onPanResponderTerminate: end,
   }));
 
-  const colW = Math.floor((gridW - 8 - MINI_GAP * (cols - 1)) / cols); // 8 = miniGrid padding
+  const scale = (gridW - 8) / inner; // 8 = miniGrid padding
   return (
     <Modal transparent animationType="fade" onRequestClose={onClose}>
       <Pressable style={s.backdrop} onPress={onClose} accessibilityLabel="Close edit layout" />
@@ -249,17 +288,16 @@ function EditLayout({ saved, cols, spanOf, onClose, onReorder, onRemove }) {
         <Text style={s.caption}>Drag a tile to move it.</Text>
         <View style={s.miniGrid} onLayout={(e) => setGridW(e.nativeEvent.layout.width)}>
           {gridW > 0 && saved.map((st, i) => {
-            const span = spanOf(st.code);
             const dragging = dragCode === st.code;
             const neighbour = (dir) => saved[i + dir] && onReorder(st.code, saved[i + dir].code);
             return (
               <Animated.View key={st.code} {...responderFor(st.code).panHandlers}
-                onLayout={(e) => { layouts.current[st.code] = e.nativeEvent.layout; }}
+                ref={(el) => { tileRefs.current[st.code] = el; }}
                 accessible accessibilityLabel={`${st.name}, tile ${i + 1} of ${saved.length}`}
                 accessibilityActions={[{ name: 'decrement', label: 'Move earlier' }, { name: 'increment', label: 'Move later' }]}
                 onAccessibilityAction={(e) => neighbour(e.nativeEvent.actionName === 'increment' ? 1 : -1)}
                 style={[s.miniTile, {
-                  width: span * colW + (span - 1) * MINI_GAP,
+                  width: Math.floor(widthOf(st.code) * scale),
                   backgroundColor: CARD_COLORS[(i + 1) % CARD_COLORS.length], // same offset as the real tiles
                 }, overCode === st.code && !dragging && s.miniTarget,
                 dragging && { zIndex: 2, boxShadow: `6px 6px 0 ${C.ink}`, transform: [...pan.getTranslateTransform(), { scale: 1.04 }] }]}>
@@ -340,32 +378,24 @@ export default function App() {
       return p;
     });
 
-  // Bento: column count from screen width, each tile spans enough columns for its bars.
+  // Bento: each tile is exactly as wide as its bars (min 3 bars, so two fit side by side on a
+  // 360px phone), packed left to right. Gaps at row ends are fine.
   const inner = Math.floor(gridW ?? Math.min(width, 1200) - 32);
-  // one column = about two bars plus card padding, so tiles come in many in-between widths
-  const cols = Math.max(2, Math.floor((inner + GAP) / (TILE_UNIT + GAP)));
-  const colW = (inner - GAP * (cols - 1)) / cols;
-  const barsPerCol = (span) => Math.max(1, Math.floor((span * colW + (span - 1) * GAP - CARD_PAD + GAP) / BAR_SLOT));
   const barsOf = (code) => {
     const list = Array.isArray(arrivals[code]) ? arrivals[code] : [];
     const starred = isSaved(code)?.services;
     return starred?.length ? list.filter((x) => starred.includes(x.no)).length : list.length;
   };
-  const spanOf = (code) => {
-    let span = 1;
-    while (span < cols && barsPerCol(span) < barsOf(code)) span++;
-    return span;
-  };
-  const tileStyle = (code) => {
-    const span = spanOf(code);
-    return { width: span * colW + (span - 1) * GAP }; // tiles keep their size; gaps are fine
-  };
+  // bars grow with the screen: 1x on a 360px phone, up to 1.6x on wide screens
+  const k = Math.min(1.6, Math.max(1, inner / 328));
+  const widthOf = (code) =>
+    Math.min(inner, (Math.max(3, barsOf(code)) * BAR_SLOT - BAR_GAP) * k + CARD_PAD);
 
   if (!fontsLoaded) return <View style={s.screen} />;
 
   const card = (code, stop, i) => (
     <StopCard key={code} code={code} stop={stop} color={CARD_COLORS[i % CARD_COLORS.length]}
-      services={arrivals[code]} saved={isSaved(code)} style={tileStyle(code)}
+      services={arrivals[code]} saved={isSaved(code)} tileW={widthOf(code)} k={k}
       onToggleStop={() => toggleStop(code, stop)} onToggleService={(no) => toggleService(code, no)} />
   );
   const openStop = openCode && !isSaved(openCode) && stops?.find((st) => st.code === openCode);
@@ -404,7 +434,7 @@ export default function App() {
         {saved.map((st, i) => card(st.code, st, i + 1))}
       </View>
       {editing && (
-        <EditLayout saved={saved} cols={cols} spanOf={spanOf}
+        <EditLayout saved={saved} inner={inner} widthOf={widthOf}
           onClose={() => setEditing(false)} onReorder={reorderStop} onRemove={removeStop} />
       )}
       {!savedCodes.length && !openStop && !q && (
@@ -449,20 +479,21 @@ const s = StyleSheet.create({
     alignItems: 'center', gap: 10, boxShadow: `4px 4px 0 ${C.ink}`,
   },
   searchInput: { flex: 1, paddingVertical: 14, fontFamily: 'SpaceGrotesk_500Medium', fontSize: 16, color: C.ink, outlineStyle: 'none' },
-  skeleton: { height: 170, width: 52, borderRadius: 999, borderWidth: 2.5, borderColor: C.ink, borderStyle: 'dashed', opacity: 0.4 },
+  skeleton: { height: BAR_H, width: BAR_W, borderRadius: 999, borderWidth: 2.5, borderColor: C.ink, borderStyle: 'dashed', opacity: 0.4 },
   btn: { ...outline, borderRadius: 24, paddingHorizontal: 20, paddingVertical: 12, boxShadow: `4px 4px 0 ${C.ink}` },
   chip: { ...outline, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 6, boxShadow: `2px 2px 0 ${C.ink}` },
-  card: { ...outline, borderRadius: 24, padding: 14, gap: 10, boxShadow: `4px 4px 0 ${C.ink}` },
+  card: { ...outline, borderRadius: 20, padding: 10, gap: 10, boxShadow: `4px 4px 0 ${C.ink}` },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  bars: { flexDirection: 'row', flexWrap: 'wrap', gap: GAP, paddingVertical: 4 },
-  barCol: { alignItems: 'center', gap: 4, width: 58 },
-  bar: { ...outline, width: 52, height: BAR_H, borderRadius: 999, backgroundColor: C.paper, overflow: 'hidden' },
+  bars: { flexDirection: 'row', flexWrap: 'wrap', gap: BAR_GAP, paddingVertical: 4 },
+  barCol: { alignItems: 'center', gap: 4, width: BAR_W },
+  bar: { ...outline, width: BAR_W, height: BAR_H, borderRadius: 999, backgroundColor: C.paper, overflow: 'hidden' },
   fill: {
     // full border (not just top) so the curve keeps an even line; the sides hide under the pill's clip
     position: 'absolute', bottom: 0, left: -2.5, right: -2.5, borderWidth: 2.5, borderBottomWidth: 0, borderColor: C.ink,
     borderTopLeftRadius: 999, borderTopRightRadius: 999, alignItems: 'center', paddingTop: 7,
   },
-  barNo: { fontFamily: 'Shrikhand_400Regular', fontSize: 20, color: C.ink },
-  etaText: { fontFamily: 'SpaceGrotesk_700Bold', fontSize: 11, letterSpacing: -0.3, color: C.ink },
+  barNo: { fontFamily: 'Shrikhand_400Regular', fontSize: 16, color: C.ink, textAlign: 'center', width: BAR_W + BAR_GAP },
+  etaText: { fontFamily: 'SpaceGrotesk_700Bold', fontSize: 12, lineHeight: 12, color: C.ink, textAlign: 'center' },
+  etaUnit: { fontFamily: 'SpaceGrotesk_500Medium', fontSize: 9, lineHeight: 10 },
 });
