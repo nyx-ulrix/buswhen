@@ -103,17 +103,45 @@ function Stat({ color, big, small }) {
 const MAP_URI = Asset.fromModule(require('./assets/system-map.png')).uri;
 const GREY_URI = Asset.fromModule(require('./assets/system-map-grey.png')).uri;
 const LABELS_FROM = 1100; // map width (px) from which the map's station names are readable
+const MAX_W = 3200; // biggest zoom, a little over the image's own 2600px
 const ROUTE_W = 12; // map units; width of the colour band revealed along the route
 function SystemMap({ route, from, to, onPick }) {
   const hRef = useRef(null);
   const vRef = useRef(null);
+  const boxRef = useRef(null);
   const [boxW, setBoxW] = useState(0);
-  // zoom steps are map widths in px; opens at the first one where the names are readable
-  const widths = [...new Set([boxW, LABELS_FROM, 1600, 2400].filter((w) => w >= boxW))];
-  const [zi, setZi] = useState(null);
-  const z = zi ?? Math.max(0, widths.findIndex((w) => w >= LABELS_FROM));
-  const mapW = widths[Math.min(z, widths.length - 1)] || 0;
+  // zoom is the map's width in px: opens where the names are readable, pinch or buttons change it
+  const [zw, setZw] = useState(null);
+  const clampW = (w) => Math.min(MAX_W, Math.max(boxW, w));
+  const mapW = boxW ? clampW(zw ?? Math.max(boxW, LABELS_FROM)) : 0;
   const mapH = (mapW * MAP_IMAGE.h) / MAP_IMAGE.w;
+  const scroll = useRef({ x: 0, y: 0 });
+  const pinch = useRef(null);
+  const dist = (t) => Math.hypot(t[0].pageX - t[1].pageX, t[0].pageY - t[1].pageY);
+  // zoom to newW keeping the map point at (vx, vy) in the visible box where it is
+  const zoomTo = (newW, vx, vy, from = { w: mapW, ...scroll.current }) => {
+    const w = clampW(newW);
+    const f = w / from.w;
+    setZw(w);
+    requestAnimationFrame(() => {
+      hRef.current?.scrollTo({ x: Math.max(0, (from.x + vx) * f - vx), animated: false });
+      vRef.current?.scrollTo({ y: Math.max(0, (from.y + vy) * f - vy), animated: false });
+    });
+  };
+  const onTouchStart = (e) => {
+    const t = e.nativeEvent.touches;
+    if (t.length !== 2) return;
+    const start = { d: dist(t), w: mapW, ...scroll.current, px: (t[0].pageX + t[1].pageX) / 2, py: (t[0].pageY + t[1].pageY) / 2 };
+    pinch.current = start;
+    boxRef.current?.measureInWindow((bx, by) => { start.bx = bx; start.by = by; });
+  };
+  const onTouchMove = (e) => {
+    const t = e.nativeEvent.touches;
+    const p = pinch.current;
+    if (!p || t.length !== 2 || p.bx == null) return;
+    zoomTo(p.w * (dist(t) / p.d), p.px - p.bx, p.py - p.by, p);
+  };
+  const onTouchEnd = (e) => { if (e.nativeEvent.touches.length < 2) pinch.current = null; };
   const pans = mapW > boxW + 1;
   const perUnit = mapW / MAP_IMAGE.w; // screen px per map unit
   // keyed by line too: some station pairs are linked by two lines (Raffles Place - City Hall)
@@ -136,13 +164,15 @@ function SystemMap({ route, from, to, onPick }) {
     const cy = c.reduce((t, p) => t + p.y, 0) / c.length;
     hRef.current?.scrollTo({ x: Math.max(0, (cx - MAP_IMAGE.x) * perUnit - boxW / 2), animated: !!pts.length });
     vRef.current?.scrollTo({ y: Math.max(0, (cy - MAP_IMAGE.y) * perUnit - 260), animated: !!pts.length });
-  }, [mapW, from, to]);
+  }, [from, to, pans]);
   const frame = { x: MAP_IMAGE.x, y: MAP_IMAGE.y, width: MAP_IMAGE.w, height: MAP_IMAGE.h };
   return (
-    <View style={[base.card, { backgroundColor: C.paper, padding: 0, overflow: 'hidden' }]}
-      onLayout={(e) => setBoxW(Math.floor(e.nativeEvent.layout.width - 5))}>
-      <ScrollView ref={hRef} horizontal scrollEnabled={pans} style={{ maxHeight: pans ? 520 : undefined }}>
-        <ScrollView ref={vRef} nestedScrollEnabled scrollEnabled={pans}>
+    <View ref={boxRef} style={[base.card, m.mapBox]} onLayout={(e) => setBoxW(Math.floor(e.nativeEvent.layout.width - 5))}
+      onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
+      <ScrollView ref={hRef} horizontal scrollEnabled={pans} style={{ maxHeight: pans ? 520 : undefined }}
+        scrollEventThrottle={16} onScroll={(e) => { scroll.current.x = e.nativeEvent.contentOffset.x; }}>
+        <ScrollView ref={vRef} nestedScrollEnabled scrollEnabled={pans}
+          scrollEventThrottle={16} onScroll={(e) => { scroll.current.y = e.nativeEvent.contentOffset.y; }}>
           {mapW > 0 && (
             <Svg width={mapW} height={mapH} viewBox={`${MAP_IMAGE.x} ${MAP_IMAGE.y} ${MAP_IMAGE.w} ${MAP_IMAGE.h}`}
               accessibilityLabel="MRT system map">
@@ -180,10 +210,10 @@ function SystemMap({ route, from, to, onPick }) {
         </ScrollView>
       </ScrollView>
       <View style={m.zoom}>
-        <IconBtn label="Zoom in" disabled={z >= widths.length - 1} onPress={() => setZi(z + 1)}>
+        <IconBtn label="Zoom in" disabled={mapW >= MAX_W} onPress={() => zoomTo(mapW * 1.5, boxW / 2, 260)}>
           <MagnifyingGlassPlus size={16} weight="bold" color={C.ink} />
         </IconBtn>
-        <IconBtn label="Zoom out" disabled={z === 0} onPress={() => setZi(z - 1)}>
+        <IconBtn label="Zoom out" disabled={mapW <= boxW} onPress={() => zoomTo(mapW / 1.5, boxW / 2, 260)}>
           <MagnifyingGlassMinus size={16} weight="bold" color={C.ink} />
         </IconBtn>
       </View>
@@ -256,4 +286,6 @@ const m = StyleSheet.create({
   linePill: { ...outline, borderWidth: 2, alignSelf: 'flex-start', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 2 },
   linePillText: { fontFamily: 'SpaceGrotesk_700Bold', fontSize: 12, color: C.paper },
   zoom: { position: 'absolute', right: 10, top: 10, gap: 8 },
+  // the map handles two-finger zoom itself, so the browser shouldn't zoom the page there
+  mapBox: { backgroundColor: C.paper, padding: 0, overflow: 'hidden', touchAction: 'pan-x pan-y' },
 });

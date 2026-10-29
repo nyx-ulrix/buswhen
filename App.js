@@ -137,7 +137,7 @@ function BusBar({ service, k }) {
   const mins = buses.map(minsUntil);
   return (
     <View style={[s.barCol, { width: BAR_W * k }]} accessible
-      accessibilityLabel={`Bus ${service.no}: ${mins.filter((m) => m != null).map((m) => (m < 1 ? 'arriving' : `${Math.floor(m)} min`)).join(', ')}`}>
+      accessibilityLabel={`Bus ${service.no}: ${mins.filter((m) => m != null).map((m) => (m < 1 ? 'arriving' : `${Math.floor(m)} min`)).join(', ') || 'no timing right now'}`}>
       <View style={[s.bar, { width: BAR_W * k, height: BAR_H * k }]}>
         {fillHeights(mins, k).map((h, i) => {
           if (h == null) return null;
@@ -341,6 +341,23 @@ function BusPage() {
   const visibleCodes = openCode && !isSaved(openCode) ? [openCode, ...savedCodes] : savedCodes;
   const arrivals = useArrivals(visibleCodes);
 
+  // Services seen at each saved stop are remembered (on the phone, with the stop), so a bus with
+  // no timing right now still shows as an empty bar instead of disappearing.
+  useEffect(() => {
+    const live = (st) => (Array.isArray(arrivals[st.code]) ? arrivals[st.code].map((s) => s.no) : []);
+    if (!saved.some((st) => live(st).some((n) => !(st.known ?? []).includes(n)))) return;
+    updateSaved((p) => p.map((st) => (live(st).some((n) => !(st.known ?? []).includes(n))
+      ? { ...st, known: [...new Set([...(st.known ?? []), ...live(st)])] } : st)));
+  }, [arrivals]);
+  const servicesAt = (code) => {
+    const list = arrivals[code];
+    if (!Array.isArray(list)) return list; // still loading, or an error
+    const st = isSaved(code);
+    const missing = [...new Set([...(st?.known ?? []), ...(st?.services ?? [])])]
+      .filter((no) => !list.some((s) => s.no === no));
+    return [...list, ...missing.map((no) => ({ no }))]; // no timings: drawn as an empty bar
+  };
+
   const removeStop = (code) => updateSaved((p) => p.filter((st) => st.code !== code));
   const toggleStop = (code, stop) =>
     isSaved(code) ? removeStop(code) : updateSaved((p) => [...p, { code, name: stop.name, road: stop.road, services: [] }]);
@@ -359,7 +376,7 @@ function BusPage() {
   // 360px phone), packed left to right. Gaps at row ends are fine.
   const inner = Math.floor(gridW ?? Math.min(width, 1200) - 32);
   const barsOf = (code) => {
-    const list = Array.isArray(arrivals[code]) ? arrivals[code] : [];
+    const list = Array.isArray(servicesAt(code)) ? servicesAt(code) : [];
     const starred = isSaved(code)?.services;
     return starred?.length ? list.filter((x) => starred.includes(x.no)).length : list.length;
   };
@@ -371,7 +388,7 @@ function BusPage() {
 
   const card = (code, stop, i) => (
     <StopCard key={code} code={code} stop={stop} color={CARD_COLORS[i % CARD_COLORS.length]}
-      services={arrivals[code]} saved={isSaved(code)} tileW={widthOf(code)} k={k}
+      services={servicesAt(code)} saved={isSaved(code)} tileW={widthOf(code)} k={k}
       onToggleStop={() => toggleStop(code, stop)} onToggleService={(no) => toggleService(code, no)} />
   );
   const openStop = openCode && !isSaved(openCode) && stops?.find((st) => st.code === openCode);
