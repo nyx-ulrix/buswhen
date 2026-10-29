@@ -3,7 +3,7 @@ import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-
 import Svg, { Circle, G, Path, Text as SvgText } from 'react-native-svg';
 import { ArrowRight, MagnifyingGlassMinus, MagnifyingGlassPlus, X } from 'phosphor-react-native';
 import { Btn, C, CARD_COLORS, IconBtn, base, outline } from './ui';
-import { EDGES, LINES, LINE_PATHS, STATIONS } from './mrt';
+import { EDGES, LINES, STATIONS } from './mrt';
 import { TRANSFER_MIN, fareCents, findRoute } from './route';
 
 const lineColour = (id) => LINES[id === 'CG' ? 'EW' : id]?.colour ?? C.grey;
@@ -103,6 +103,7 @@ const Y0 = -50;
 const VIEW_W = 1860;
 const VIEW_H = 1110;
 const LABELS_FROM = 1100; // map width (px) from which every station name is readable
+const DOT_R = 11; // one dot size for every station, the interchange size
 // Each name goes on the first side (right, below, above, left) that no line leaves the station from.
 const NEIGHBOURS = {};
 for (const [a, b] of EDGES) { (NEIGHBOURS[a] ??= []).push(b); (NEIGHBOURS[b] ??= []).push(a); }
@@ -162,11 +163,11 @@ function SystemMap({ route, from, to, onPick }) {
             <Svg width={mapW} height={(mapW * VIEW_H) / VIEW_W} viewBox={`${X0} ${Y0} ${VIEW_W} ${VIEW_H}`}>
               {/* black casing under every line, then the colour on top, like the cards' outlines */}
               <G opacity={fade}>
-                {LINE_PATHS.map(([, d], i) => (
-                  <Path key={i} d={d} stroke={C.ink} strokeWidth={22} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                {EDGES.map((e, i) => (
+                  <Path key={i} d={e[5]} stroke={C.ink} strokeWidth={22} fill="none" strokeLinecap="round" strokeLinejoin="round" />
                 ))}
-                {LINE_PATHS.map(([line, d], i) => (
-                  <Path key={`c${i}`} d={d} stroke={lineColour(line)} strokeWidth={14} fill="none" strokeLinecap="round"
+                {EDGES.map((e, i) => (
+                  <Path key={`c${i}`} d={e[5]} stroke={lineColour(e[2])} strokeWidth={14} fill="none" strokeLinecap="round"
                     strokeLinejoin="round" />
                 ))}
               </G>
@@ -190,10 +191,10 @@ function SystemMap({ route, from, to, onPick }) {
                 const size = end ? Math.max(15, label(13)) : 15;
                 return (
                   <G key={n} opacity={lit ? 1 : 0.35}>
-                    <Circle cx={st.x} cy={st.y} r={end ? 15 : inter ? 11 : 7} fill={end ? C.butter : C.paper}
-                      stroke={C.ink} strokeWidth={end ? 5 : 4} />
+                    {/* every dot the same size; the start and end stand out by colour */}
+                    <Circle cx={st.x} cy={st.y} r={DOT_R} fill={end ? C.butter : C.paper} stroke={C.ink} strokeWidth={4} />
                     {named && (
-                                            <SvgText {...labelAt(LABEL_SIDE[n], st, end ? 20 : 15, size)} fontSize={size}
+                      <SvgText {...labelAt(LABEL_SIDE[n], st, DOT_R + 6, size)} fontSize={size}
                         fontFamily="SpaceGrotesk_700Bold" fill={C.ink}
                         stroke={C.paper} strokeWidth={size / 4} paintOrder="stroke">{n}</SvgText>
                     )}

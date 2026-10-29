@@ -1,9 +1,9 @@
-"""Builds mrt.js (stations, edges, map positions, distances) for the MRT page.
+"""Builds mrt.js (stations, edges, map layout, distances) for the MRT page.
 
 Sources:
 - data/mrt_travel_times.csv: adjacent-station travel times (from DataStructureAssignment2)
 - station coordinates from cheeaun/sgraildata (LTA open data), only used to measure distances for fares
-- POS below: schematic map positions, laid out after LTA's system map
+- POS below: rough map positions; data/map_layout.json (scripts/align_map.py) measures the exact layout
 
 usage: python scripts/build_mrt.py
 """
@@ -66,12 +66,12 @@ POS = {
 Y_SHIFT = 260  # the map's top margin, trimmed
 
 
-RDP_TOLERANCE = 22  # bends smaller than this (map units) are hand-placement noise, not real corners
-CORNER_R = 70  # rounded corner radius, like the system map's sweeping curves
+LAYOUT = ROOT / 'data/map_layout.json'  # measured from LTA's system map by scripts/align_map.py
+SIMPLIFY = 2.0  # map units; removes the pixel stair-steps of the traced lines
 
 
 def rdp(pts, tol):
-    """Ramer-Douglas-Peucker: keep only the points that are real corners."""
+    """Ramer-Douglas-Peucker: keep only the points that shape the line."""
     if len(pts) < 3:
         return pts
     (x1, y1), (x2, y2) = pts[0], pts[-1]
@@ -83,39 +83,15 @@ def rdp(pts, tol):
     return rdp(pts[:i + 1], tol)[:-1] + rdp(pts[i:], tol)
 
 
-def project(p, poly):
-    """nearest point on a polyline, and its distance along it"""
-    best, run = None, 0.0
-    for (ax, ay), (bx, by) in zip(poly, poly[1:]):
-        L = math.hypot(bx - ax, by - ay) or 1e-9
-        t = max(0.0, min(1.0, ((p[0] - ax) * (bx - ax) + (p[1] - ay) * (by - ay)) / L ** 2))
-        q = (ax + t * (bx - ax), ay + t * (by - ay))
-        d = math.hypot(q[0] - p[0], q[1] - p[1])
-        if best is None or d < best[0]:
-            best = (d, q, run + t * L)
-        run += L
-    return best[1], best[2]
-
-
-def round_corners(poly, pinned, r=CORNER_R, steps=12):
-    """Points along the polyline with each corner replaced by a curve. Corners at pinned points
-    (interchanges) stay sharp so every line through an interchange really passes through it."""
-    poly = [p for i, p in enumerate(poly) if i == 0 or math.dist(p, poly[i - 1]) > 0.5]  # drop repeats
-    out = [poly[0]]
-    for p, v, n in zip(poly, poly[1:], poly[2:]):
-        if v in pinned:
-            out.append(v)
-            continue
-        lp, ln = math.dist(p, v), math.dist(v, n)
-        rr = min(r, lp / 2, ln / 2)
-        a = (v[0] + (p[0] - v[0]) * rr / lp, v[1] + (p[1] - v[1]) * rr / lp)
-        b = (v[0] + (n[0] - v[0]) * rr / ln, v[1] + (n[1] - v[1]) * rr / ln)
-        for k in range(steps + 1):  # quadratic curve a -> b with v as control
-            t = k / steps
-            out.append(((1 - t) ** 2 * a[0] + 2 * (1 - t) * t * v[0] + t * t * b[0],
-                        (1 - t) ** 2 * a[1] + 2 * (1 - t) * t * v[1] + t * t * b[1]))
-    out.append(poly[-1])
-    return out
+def chaikin(pts, rounds=3):
+    """corner-cutting smoothing; keeps both ends where the stations are"""
+    for _ in range(rounds):
+        out = [pts[0]]
+        for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+            out += [(0.75 * ax + 0.25 * bx, 0.75 * ay + 0.25 * by), (0.25 * ax + 0.75 * bx, 0.25 * ay + 0.75 * by)]
+        out.append(pts[-1])
+        pts = out
+    return pts
 
 
 def svg(pts):
@@ -123,70 +99,30 @@ def svg(pts):
     return 'M' + 'L'.join(f'{f(x)} {f(y)}' for x, y in pts)
 
 
-def smooth_lines(edges, codes, stations):
-    """Straighten each line into runs between real corners, round the corners, and put every
-    station dot exactly on its line. Interchanges are pinned: all their lines pass through them.
-    Updates station x/y in place; returns (line paths, {edge: path along the line})."""
-    per_line, lines_at = {}, {}
-    for a, b, line, _ in edges:
-        per_line.setdefault(line, []).append((a, b))
-        for n in (a, b):
-            lines_at.setdefault(n, set()).add(line)
-    pin = {n for n, ls in lines_at.items() if len(ls) > 1}
-    at = lambda n: (stations[n]['x'], stations[n]['y'])
-    pinned = {at(n) for n in pin}
+def apply_layout(edges, codes, stations):
+    """Station positions and line shapes from the measured layout. Updates station x/y in place;
+    returns {(a, b, line): svg path} for every edge."""
+    layout = json.loads(LAYOUT.read_text())
+    at = {c: (x, y - Y_SHIFT) for c, (x, y) in layout['codes'].items()}
+    for n, cs in codes.items():
+        pts = [at[c] for c in cs if c in at]
+        stations[n]['x'] = round(sum(p[0] for p in pts) / len(pts), 1)
+        stations[n]['y'] = round(sum(p[1] for p in pts) / len(pts), 1)
+    traced = {k: [(x, y - Y_SHIFT) for x, y in v] for k, v in layout['edges'].items()}
 
-    line_paths, edge_paths, moved = [], {}, {}
-    for line, es in per_line.items():
-        adj = {}
-        for a, b in es:
-            adj.setdefault(a, []).append(b)
-            adj.setdefault(b, []).append(a)
-        # maximal runs through stations with exactly two neighbours on this line
-        used, chains = set(), []
-        starts = [n for n in adj if len(adj[n]) != 2] or [next(iter(adj))]
-        for s in starts:
-            for nxt in adj[s]:
-                if frozenset((s, nxt)) in used:
-                    continue
-                chain = [s, nxt]
-                used.add(frozenset((s, nxt)))
-                while len(adj[chain[-1]]) == 2 and chain[-1] != s:
-                    step = next((x for x in adj[chain[-1]] if frozenset((chain[-1], x)) not in used), None)
-                    if step is None:
-                        break
-                    used.add(frozenset((chain[-1], step)))
-                    chain.append(step)
-                chains.append(chain)
-        for chain in chains:
-            raw = [at(n) for n in chain]
-            # simplify between pinned stations so the line can't drift off an interchange
-            cuts = [0] + [i for i, n in enumerate(chain[1:-1], 1) if n in pin] + [len(chain) - 1]
-            poly = [raw[0]]
-            for i, j in zip(cuts, cuts[1:]):
-                poly += rdp(raw[i:j + 1], RDP_TOLERANCE)[1:]
-            curve = round_corners(poly, pinned)
-            line_paths.append([line, svg(curve)])
-            along = {}
-            for n, p in zip(chain, raw):
-                q, t = project(p, curve)
-                along[n] = (t, q if n not in pin else p)
-                if n not in pin:
-                    moved[n] = q
-            # each edge's piece of the curve between its two stations
-            cum = [0.0]
-            for u, v in zip(curve, curve[1:]):
-                cum.append(cum[-1] + math.dist(u, v))
-            for u, v in zip(chain, chain[1:]):
-                (t0, p0), (t1, p1) = along[u], along[v]
-                lo, hi = sorted((t0, t1))
-                mid = [c for c, t in zip(curve, cum) if lo < t < hi]
-                if t0 > t1:
-                    mid.reverse()
-                edge_paths[(u, v, line)] = edge_paths[(v, u, line)] = svg([p0, *mid, p1])
-    for n, q in moved.items():
-        stations[n]['x'], stations[n]['y'] = round(q[0], 1), round(q[1], 1)
-    return line_paths, edge_paths
+    def code_on(n, line):
+        want = 'EW' if line == 'CG' else line
+        return next(c for c in codes[n] if c in at and
+                    {'CE': 'CC', 'CG': 'EW'}.get(c.rstrip('0123456789A'), c.rstrip('0123456789A')) == want)
+
+    paths = {}
+    for a, b, line, *_ in edges:
+        ca, cb = code_on(a, line), code_on(b, line)
+        pts = traced.get(f'{ca}|{cb}') or traced[f'{cb}|{ca}'][::-1]
+        # start and end at the station dots (interchange dots sit between their codes)
+        pts = [(stations[a]['x'], stations[a]['y']), *pts[1:-1], (stations[b]['x'], stations[b]['y'])]
+        paths[(a, b, line)] = paths[(b, a, line)] = svg(chaikin(rdp(pts, SIMPLIFY)))
+    return paths
 
 
 def main():
@@ -232,7 +168,7 @@ def main():
             'll': [round(ll[1], 6), round(ll[0], 6)],
         }
 
-    line_paths, edge_paths = smooth_lines(edges, codes, stations)
+    edge_paths = apply_layout(edges, codes, stations)
 
     def km(a, b):
         (la1, lo1), (la2, lo2) = stations[a]['ll'], stations[b]['ll']
@@ -248,11 +184,10 @@ def main():
            f'export const LINES = {json.dumps(lines)};\n'
            f'export const STATIONS = {json.dumps(stations, ensure_ascii=False)};\n'
            '// [from, to, line, minutes, km, svg path along the line]\n'
-           f'export const EDGES = {json.dumps(edges, ensure_ascii=False)};\n'
-           '// one smooth svg path per continuous run of a line: [line, d]\n'
-           f'export const LINE_PATHS = {json.dumps(line_paths)};\n')
+           f'export const EDGES = {json.dumps(edges, ensure_ascii=False)};\n')
     (ROOT / 'mrt.js').write_text(out, encoding='utf-8')
     print(f'{len(stations)} stations, {len(edges)} edges -> mrt.js')
 
 
-main()
+if __name__ == "__main__":
+    main()
