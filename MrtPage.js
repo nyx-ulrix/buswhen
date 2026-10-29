@@ -112,9 +112,13 @@ function SystemMap({ route, from, to, onPick }) {
   const [boxW, setBoxW] = useState(0);
   // zoom is the map's width in px: opens where the names are readable, pinch or buttons change it
   const [zw, setZw] = useState(null);
-  const clampW = (w) => Math.min(MAX_W, Math.max(boxW, w));
+  // the box keeps one height at every zoom; only the map inside grows or shrinks
+  const aspect = MAP_IMAGE.h / MAP_IMAGE.w;
+  const boxH = Math.round(Math.min(520, Math.max(360, boxW * aspect)));
+  const minW = Math.min(boxW, boxH / aspect); // fully zoomed out, the whole map fits the box
+  const clampW = (w) => Math.min(MAX_W, Math.max(minW, w));
   const mapW = boxW ? clampW(zw ?? Math.max(boxW, LABELS_FROM)) : 0;
-  const mapH = (mapW * MAP_IMAGE.h) / MAP_IMAGE.w;
+  const mapH = mapW * aspect;
   const scroll = useRef({ x: 0, y: 0 });
   const pinch = useRef(null);
   const dist = (t) => Math.hypot(t[0].pageX - t[1].pageX, t[0].pageY - t[1].pageY);
@@ -142,7 +146,7 @@ function SystemMap({ route, from, to, onPick }) {
     zoomTo(p.w * (dist(t) / p.d), p.px - p.bx, p.py - p.by, p);
   };
   const onTouchEnd = (e) => { if (e.nativeEvent.touches.length < 2) pinch.current = null; };
-  const pans = mapW > boxW + 1;
+  const pans = mapW > boxW + 1 || mapH > boxH + 1;
   const perUnit = mapW / MAP_IMAGE.w; // screen px per map unit
   // keyed by line too: some station pairs are linked by two lines (Raffles Place - City Hall)
   const hopKey = (a, b, line) => `${[a, b].sort().join('|')}|${line}`;
@@ -163,17 +167,18 @@ function SystemMap({ route, from, to, onPick }) {
     const cx = c.reduce((t, p) => t + p.x, 0) / c.length;
     const cy = c.reduce((t, p) => t + p.y, 0) / c.length;
     hRef.current?.scrollTo({ x: Math.max(0, (cx - MAP_IMAGE.x) * perUnit - boxW / 2), animated: !!pts.length });
-    vRef.current?.scrollTo({ y: Math.max(0, (cy - MAP_IMAGE.y) * perUnit - 260), animated: !!pts.length });
+    vRef.current?.scrollTo({ y: Math.max(0, (cy - MAP_IMAGE.y) * perUnit - boxH / 2), animated: !!pts.length });
   }, [from, to, pans]);
   const frame = { x: MAP_IMAGE.x, y: MAP_IMAGE.y, width: MAP_IMAGE.w, height: MAP_IMAGE.h };
   return (
     <View ref={boxRef} style={[base.card, m.mapBox]} onLayout={(e) => setBoxW(Math.floor(e.nativeEvent.layout.width - 5))}
       onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
-      <ScrollView ref={hRef} horizontal scrollEnabled={pans} style={{ maxHeight: pans ? 520 : undefined }}
+      <ScrollView ref={hRef} horizontal scrollEnabled={pans} style={{ height: boxH }}
         scrollEventThrottle={16} onScroll={(e) => { scroll.current.x = e.nativeEvent.contentOffset.x; }}>
-        <ScrollView ref={vRef} nestedScrollEnabled scrollEnabled={pans}
+        <ScrollView ref={vRef} nestedScrollEnabled scrollEnabled={pans} style={{ height: boxH }}
           scrollEventThrottle={16} onScroll={(e) => { scroll.current.y = e.nativeEvent.contentOffset.y; }}>
           {mapW > 0 && (
+            <View style={{ width: Math.max(mapW, boxW), height: Math.max(mapH, boxH), alignItems: 'center', justifyContent: 'center' }}>
             <Svg width={mapW} height={mapH} viewBox={`${MAP_IMAGE.x} ${MAP_IMAGE.y} ${MAP_IMAGE.w} ${MAP_IMAGE.h}`}
               accessibilityLabel="MRT system map">
               {route ? (
@@ -206,14 +211,15 @@ function SystemMap({ route, from, to, onPick }) {
                   fill="transparent" onPress={() => onPick(n)} />
               ))}
             </Svg>
+            </View>
           )}
         </ScrollView>
       </ScrollView>
       <View style={m.zoom}>
-        <IconBtn label="Zoom in" disabled={mapW >= MAX_W} onPress={() => zoomTo(mapW * 1.5, boxW / 2, 260)}>
+        <IconBtn label="Zoom in" disabled={mapW >= MAX_W} onPress={() => zoomTo(mapW * 1.5, boxW / 2, boxH / 2)}>
           <MagnifyingGlassPlus size={16} weight="bold" color={C.ink} />
         </IconBtn>
-        <IconBtn label="Zoom out" disabled={mapW <= boxW} onPress={() => zoomTo(mapW / 1.5, boxW / 2, 260)}>
+        <IconBtn label="Zoom out" disabled={mapW <= minW + 1} onPress={() => zoomTo(mapW / 1.5, boxW / 2, boxH / 2)}>
           <MagnifyingGlassMinus size={16} weight="bold" color={C.ink} />
         </IconBtn>
       </View>
