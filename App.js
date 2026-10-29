@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  AccessibilityInfo, Animated, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions,
+  AccessibilityInfo, Animated, Modal, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFonts, Shrikhand_400Regular } from '@expo-google-fonts/shrikhand';
 import { SpaceGrotesk_500Medium, SpaceGrotesk_700Bold } from '@expo-google-fonts/space-grotesk';
-import { ArrowDown, ArrowUp, Bus, MagnifyingGlass, PencilSimple, Trash } from 'phosphor-react-native';
+import { BookmarkSimple, Bus, MagnifyingGlass, PencilSimple, Trash } from 'phosphor-react-native';
 
 const C = {
   ink: '#111111', paper: '#FFFDF5', violet: '#A98BF5', peach: '#FFB86B', lime: '#C8F169',
@@ -19,6 +19,8 @@ const ARRIVALS_URL = 'https://arrivelah2.busrouter.sg/?id=';
 const STORE_KEY = 'buswhen.saved';
 const GAP = 12;
 const BAR_SLOT = 70; // bar column width + gap between bars
+const CARD_PAD = 41; // card padding + border, both sides
+const TILE_UNIT = 2 * BAR_SLOT - GAP + CARD_PAD; // grid column width: fits two bars
 
 // saved: [{ code, name, road, services: [no] }] in tile order, empty services = show all
 function useSaved() {
@@ -154,20 +156,21 @@ function StopCard({ code, stop, services: raw, color, saved, style, onToggleStop
   const [picking, setPicking] = useState(false);
   return (
     <View style={[s.card, { backgroundColor: color }, style]}>
-      <View style={[s.row, { flexWrap: 'wrap' }]}>
-        <View style={{ flex: 1, minWidth: 110 }}>
+      <View style={[s.row, { alignItems: 'flex-start', flexWrap: 'wrap' }]}>
+        <View style={{ flex: 1, minWidth: 100 }}>
           <Text style={s.cardTitle}>{stop.name}</Text>
           <Text style={s.caption}>{code} · {stop.road}</Text>
         </View>
-        <View style={s.row}>
+        <View style={[s.row, { gap: 8 }]}>
           {saved && services.length > 0 && (
-            <IconBtn label={picking ? 'Done choosing buses' : 'Choose which buses to show'} onPress={() => setPicking(!picking)}>
-              <PencilSimple size={18} weight="bold" color={C.ink} />
+            <IconBtn active={picking} label={picking ? 'Done choosing buses' : 'Choose which buses to show'}
+              onPress={() => setPicking(!picking)}>
+              <PencilSimple size={18} weight="bold" color={picking ? C.paper : C.ink} />
             </IconBtn>
           )}
-          <Btn small color={saved ? C.ink : C.paper} onPress={onToggleStop}>
-            <Text style={[s.label, saved && { color: C.paper }]}>{saved ? 'Saved' : 'Save'}</Text>
-          </Btn>
+          <IconBtn label={saved ? `Remove ${stop.name} from saved` : `Save ${stop.name}`} onPress={onToggleStop}>
+            <BookmarkSimple size={18} weight={saved ? 'fill' : 'bold'} color={C.ink} />
+          </IconBtn>
         </View>
       </View>
       {raw === undefined && <View style={s.skeleton} />}
@@ -195,32 +198,85 @@ function StopCard({ code, stop, services: raw, color, saved, style, onToggleStop
   );
 }
 
-function EditLayout({ saved, onClose, onMove, onRemove }) {
+// Zoomed-out copy of the bento grid. Drag a tile onto another to move it there.
+const MINI_GAP = 6;
+function EditLayout({ saved, cols, spanOf, onClose, onReorder, onRemove }) {
+  const [gridW, setGridW] = useState(0);
+  const [dragCode, setDragCode] = useState(null);
+  const [overCode, setOverCode] = useState(null);
+  const pan = useRef(new Animated.ValueXY()).current;
+  const layouts = useRef({});
+  const responders = useRef({});
+  const live = useRef({});
+  live.current = { saved, onReorder }; // responders are made once, so they read fresh values from here
+
+  // which tile is under the dragged tile's centre (nearest one if between tiles)
+  const hit = (code, dx, dy) => {
+    const a = layouts.current[code];
+    if (!a) return null;
+    const x = a.x + a.width / 2 + dx;
+    const y = a.y + a.height / 2 + dy;
+    let best = null;
+    let bestD = Infinity;
+    for (const { code: c } of live.current.saved) {
+      const b = layouts.current[c];
+      if (!b) continue;
+      const d = (b.x + b.width / 2 - x) ** 2 + (b.y + b.height / 2 - y) ** 2;
+      if (d < bestD) { bestD = d; best = c; }
+    }
+    return best;
+  };
+  const end = () => { setDragCode(null); setOverCode(null); pan.setValue({ x: 0, y: 0 }); };
+  const responderFor = (code) => (responders.current[code] ??= PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onPanResponderTerminationRequest: () => false,
+    onPanResponderGrant: () => { pan.setValue({ x: 0, y: 0 }); setDragCode(code); },
+    onPanResponderMove: (_, g) => { pan.setValue({ x: g.dx, y: g.dy }); setOverCode(hit(code, g.dx, g.dy)); },
+    onPanResponderRelease: (_, g) => {
+      const to = hit(code, g.dx, g.dy);
+      end();
+      if (to && to !== code) live.current.onReorder(code, to);
+    },
+    onPanResponderTerminate: end,
+  }));
+
+  const colW = Math.floor((gridW - 8 - MINI_GAP * (cols - 1)) / cols); // 8 = miniGrid padding
   return (
     <Modal transparent animationType="fade" onRequestClose={onClose}>
       <Pressable style={s.backdrop} onPress={onClose} accessibilityLabel="Close edit layout" />
       <View style={s.sheet}>
         <Text style={s.displaySm}>Edit layout</Text>
-        <Text style={s.caption}>Tiles show in this order, left to right.</Text>
-        <ScrollView style={{ maxHeight: 420 }} contentContainerStyle={{ gap: 10, padding: 4 }}>
-          {saved.map((st, i) => (
-            <View key={st.code} style={[s.editRow, { backgroundColor: CARD_COLORS[i % CARD_COLORS.length] }]}>
-              <View style={{ flex: 1 }}>
-                <Text style={s.label} numberOfLines={1}>{st.name}</Text>
-                <Text style={s.caption}>{st.code}</Text>
-              </View>
-              <IconBtn label={`Move ${st.name} up`} disabled={i === 0} onPress={() => onMove(i, -1)}>
-                <ArrowUp size={18} weight="bold" color={C.ink} />
-              </IconBtn>
-              <IconBtn label={`Move ${st.name} down`} disabled={i === saved.length - 1} onPress={() => onMove(i, 1)}>
-                <ArrowDown size={18} weight="bold" color={C.ink} />
-              </IconBtn>
-              <IconBtn label={`Remove ${st.name}`} onPress={() => onRemove(st.code)}>
-                <Trash size={18} weight="bold" color={C.ink} />
-              </IconBtn>
-            </View>
-          ))}
-        </ScrollView>
+        <Text style={s.caption}>Drag a tile to move it.</Text>
+        <View style={s.miniGrid} onLayout={(e) => setGridW(e.nativeEvent.layout.width)}>
+          {gridW > 0 && saved.map((st, i) => {
+            const span = spanOf(st.code);
+            const dragging = dragCode === st.code;
+            const neighbour = (dir) => saved[i + dir] && onReorder(st.code, saved[i + dir].code);
+            return (
+              <Animated.View key={st.code} {...responderFor(st.code).panHandlers}
+                onLayout={(e) => { layouts.current[st.code] = e.nativeEvent.layout; }}
+                accessible accessibilityLabel={`${st.name}, tile ${i + 1} of ${saved.length}`}
+                accessibilityActions={[{ name: 'decrement', label: 'Move earlier' }, { name: 'increment', label: 'Move later' }]}
+                onAccessibilityAction={(e) => neighbour(e.nativeEvent.actionName === 'increment' ? 1 : -1)}
+                style={[s.miniTile, {
+                  width: span * colW + (span - 1) * MINI_GAP,
+                  backgroundColor: CARD_COLORS[(i + 1) % CARD_COLORS.length], // same offset as the real tiles
+                }, overCode === st.code && !dragging && s.miniTarget,
+                dragging && { zIndex: 2, boxShadow: `6px 6px 0 ${C.ink}`, transform: [...pan.getTranslateTransform(), { scale: 1.04 }] }]}>
+                <View style={[s.row, { alignItems: 'flex-start' }]}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.miniTitle} numberOfLines={2}>{st.name}</Text>
+                    <Text style={s.caption}>{st.code}</Text>
+                  </View>
+                  <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${st.name}`} hitSlop={8}
+                    onPress={() => onRemove(st.code)} style={s.miniRemove}>
+                    <Trash size={12} weight="bold" color={C.ink} />
+                  </Pressable>
+                </View>
+              </Animated.View>
+            );
+          })}
+        </View>
         <Btn color={C.ink} onPress={onClose}>
           <Text style={[s.label, { color: C.paper, textAlign: 'center' }]}>Done</Text>
         </Btn>
@@ -229,10 +285,11 @@ function EditLayout({ saved, onClose, onMove, onRemove }) {
   );
 }
 
-function IconBtn({ children, label, disabled, onPress }) {
+function IconBtn({ children, label, disabled, active, onPress }) {
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled} onPress={onPress}
-      style={({ pressed }) => [s.iconBtn, disabled && { opacity: 0.3 },
+    <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected: !!active }}
+      disabled={disabled} onPress={onPress}
+      style={({ pressed }) => [s.iconBtn, disabled && { opacity: 0.3 }, active && { backgroundColor: C.ink },
         pressed && { transform: [{ translateX: 2 }, { translateY: 2 }], boxShadow: 'none' }]}>
       {children}
     </Pressable>
@@ -275,30 +332,40 @@ export default function App() {
   const toggleService = (code, no) =>
     updateSaved((p) => p.map((st) => (st.code !== code ? st
       : { ...st, services: st.services.includes(no) ? st.services.filter((x) => x !== no) : [...st.services, no] })));
-  const moveStop = (i, dir) =>
+  const reorderStop = (fromCode, toCode) =>
     updateSaved((p) => {
-      [p[i], p[i + dir]] = [p[i + dir], p[i]];
+      const to = p.findIndex((st) => st.code === toCode); // dragged tile takes the target's slot
+      const [moved] = p.splice(p.findIndex((st) => st.code === fromCode), 1);
+      p.splice(to, 0, moved);
       return p;
     });
 
   // Bento: column count from screen width, each tile spans enough columns for its bars.
   const inner = Math.floor(gridW ?? Math.min(width, 1200) - 32);
-  const cols = inner >= 1000 ? 4 : inner >= 640 ? 3 : 2;
+  // one column = about two bars plus card padding, so tiles come in many in-between widths
+  const cols = Math.max(2, Math.floor((inner + GAP) / (TILE_UNIT + GAP)));
   const colW = (inner - GAP * (cols - 1)) / cols;
-  const barsPerCol = Math.max(1, Math.floor((colW - 36 + GAP) / BAR_SLOT));
-  const tileStyle = (code, starred) => {
+  const barsPerCol = (span) => Math.max(1, Math.floor((span * colW + (span - 1) * GAP - CARD_PAD + GAP) / BAR_SLOT));
+  const barsOf = (code) => {
     const list = Array.isArray(arrivals[code]) ? arrivals[code] : [];
-    const n = starred?.length ? list.filter((x) => starred.includes(x.no)).length : list.length;
-    const span = Math.min(cols, Math.max(1, Math.ceil(n / barsPerCol)));
-    // flexGrow lets the last tile in a row stretch, so rows never leave holes
-    return { flexBasis: span * colW + (span - 1) * GAP, flexGrow: 1 };
+    const starred = isSaved(code)?.services;
+    return starred?.length ? list.filter((x) => starred.includes(x.no)).length : list.length;
+  };
+  const spanOf = (code) => {
+    let span = 1;
+    while (span < cols && barsPerCol(span) < barsOf(code)) span++;
+    return span;
+  };
+  const tileStyle = (code) => {
+    const span = spanOf(code);
+    return { width: span * colW + (span - 1) * GAP }; // tiles keep their size; gaps are fine
   };
 
   if (!fontsLoaded) return <View style={s.screen} />;
 
   const card = (code, stop, i) => (
     <StopCard key={code} code={code} stop={stop} color={CARD_COLORS[i % CARD_COLORS.length]}
-      services={arrivals[code]} saved={isSaved(code)} style={tileStyle(code, isSaved(code)?.services)}
+      services={arrivals[code]} saved={isSaved(code)} style={tileStyle(code)}
       onToggleStop={() => toggleStop(code, stop)} onToggleService={(no) => toggleService(code, no)} />
   );
   const openStop = openCode && !isSaved(openCode) && stops?.find((st) => st.code === openCode);
@@ -336,9 +403,12 @@ export default function App() {
       <View style={s.bento} onLayout={(e) => setGridW(e.nativeEvent.layout.width)}>
         {saved.map((st, i) => card(st.code, st, i + 1))}
       </View>
-      {editing && <EditLayout saved={saved} onClose={() => setEditing(false)} onMove={moveStop} onRemove={removeStop} />}
+      {editing && (
+        <EditLayout saved={saved} cols={cols} spanOf={spanOf}
+          onClose={() => setEditing(false)} onReorder={reorderStop} onRemove={removeStop} />
+      )}
       {!savedCodes.length && !openStop && !q && (
-        <Text style={[s.caption, { marginTop: 24 }]}>Search a stop and tap Save to keep it here. Saved stops live only on this phone.</Text>
+        <Text style={[s.caption, { marginTop: 24 }]}>Search a stop and tap the bookmark to keep it here. Saved stops live only on this phone.</Text>
       )}
     </ScrollView>
   );
@@ -348,16 +418,23 @@ const outline = { borderWidth: 2.5, borderColor: C.ink };
 const s = StyleSheet.create({
   screen: { flex: 1, backgroundColor: C.violet },
   content: { padding: 16, gap: GAP, maxWidth: 1200, width: '100%', alignSelf: 'center' },
-  bento: { flexDirection: 'row', flexWrap: 'wrap', gap: GAP, alignItems: 'stretch' },
+  bento: { flexDirection: 'row', flexWrap: 'wrap', gap: GAP, alignItems: 'flex-start' },
   displaySm: { fontFamily: 'Shrikhand_400Regular', fontSize: 28, lineHeight: 34, color: C.ink },
   backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(17,17,17,0.45)' },
   sheet: {
-    ...outline, position: 'absolute', left: 16, right: 16, bottom: 16, maxWidth: 520, marginHorizontal: 'auto',
+    ...outline, position: 'absolute', left: 16, right: 16, bottom: 16, maxWidth: 640, marginHorizontal: 'auto',
     backgroundColor: C.paper, borderRadius: 28, padding: 20, gap: 12, boxShadow: `4px 4px 0 ${C.ink}`,
   },
-  editRow: {
-    ...outline, borderRadius: 20, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 8,
-    boxShadow: `2px 2px 0 ${C.ink}`,
+  miniGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: MINI_GAP, padding: 4, alignItems: 'flex-start' },
+  miniTile: {
+    borderWidth: 2, borderColor: C.ink, borderRadius: 16, padding: 8, gap: 6, minHeight: 84,
+    boxShadow: `2px 2px 0 ${C.ink}`, cursor: 'grab', userSelect: 'none', touchAction: 'none',
+  },
+  miniTarget: { borderStyle: 'dashed', opacity: 0.55 },
+  miniTitle: { fontFamily: 'SpaceGrotesk_700Bold', fontSize: 12, lineHeight: 14, color: C.ink },
+  miniRemove: {
+    borderWidth: 1.5, borderColor: C.ink, borderRadius: 999, width: 22, height: 22,
+    alignItems: 'center', justifyContent: 'center', backgroundColor: C.paper,
   },
   iconBtn: {
     ...outline, width: 40, height: 40, borderRadius: 999, backgroundColor: C.paper,
