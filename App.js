@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { AccessibilityInfo, Animated, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import {
+  AccessibilityInfo, Animated, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions,
+} from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFonts, Shrikhand_400Regular } from '@expo-google-fonts/shrikhand';
 import { SpaceGrotesk_500Medium, SpaceGrotesk_700Bold } from '@expo-google-fonts/space-grotesk';
-import { Bus, MagnifyingGlass } from 'phosphor-react-native';
+import { ArrowDown, ArrowUp, Bus, MagnifyingGlass, PencilSimple, Trash } from 'phosphor-react-native';
 
 const C = {
   ink: '#111111', paper: '#FFFDF5', violet: '#A98BF5', peach: '#FFB86B', lime: '#C8F169',
@@ -15,16 +17,23 @@ const BAR_WINDOW_MIN = 30; // a bus fills its bar from 30 min out to 0
 const STOPS_URL = 'https://data.busrouter.sg/v1/stops.min.json';
 const ARRIVALS_URL = 'https://arrivelah2.busrouter.sg/?id=';
 const STORE_KEY = 'buswhen.saved';
+const GAP = 12;
+const BAR_SLOT = 70; // bar column width + gap between bars
 
-// saved: { [stopCode]: { name, road, services: [no] } }, empty services = show all
+// saved: [{ code, name, road, services: [no] }] in tile order, empty services = show all
 function useSaved() {
-  const [saved, setSaved] = useState({});
+  const [saved, setSaved] = useState([]);
   useEffect(() => {
-    AsyncStorage.getItem(STORE_KEY).then((v) => v && setSaved(JSON.parse(v))).catch(() => {});
+    AsyncStorage.getItem(STORE_KEY).then((v) => {
+      if (!v) return;
+      const d = JSON.parse(v);
+      // first version stored an object keyed by stop code
+      setSaved(Array.isArray(d) ? d : Object.entries(d).map(([code, st]) => ({ code, ...st })));
+    }).catch(() => {});
   }, []);
   const update = (fn) =>
     setSaved((prev) => {
-      const next = fn({ ...prev });
+      const next = fn([...prev]);
       AsyncStorage.setItem(STORE_KEY, JSON.stringify(next)).catch(() => {});
       return next;
     });
@@ -96,6 +105,22 @@ function Flash({ on, children }) {
   return <Animated.View style={[StyleSheet.absoluteFill, { opacity: v }]}>{children}</Animated.View>;
 }
 
+// Fill heights in px, nearest bus tallest. Each fill keeps LABEL_ROOM px above the one in front
+// so the time printed at its top edge stays readable even when buses bunch up.
+const BAR_H = 170;
+const LABEL_ROOM = 22;
+function fillHeights(mins) {
+  const out = [null, null, null];
+  let floor = 10; // lowest fill is at least 32px, enough for a full dome
+  for (let i = 2; i >= 0; i--) {
+    if (mins[i] == null) continue;
+    const raw = (1 - mins[i] / BAR_WINDOW_MIN) * BAR_H;
+    out[i] = Math.min(BAR_H, Math.max(raw, floor + LABEL_ROOM));
+    floor = out[i];
+  }
+  return out;
+}
+
 // One pill per service: the 3 upcoming buses as stacked fills, nearest = tallest, drawn first.
 function BusBar({ service }) {
   const buses = [service.next, service.next2, service.next3];
@@ -104,50 +129,57 @@ function BusBar({ service }) {
     <View style={s.barCol} accessible
       accessibilityLabel={`Bus ${service.no}: ${mins.filter((m) => m != null).map((m) => (m < 1 ? 'arriving' : `${Math.floor(m)} min`)).join(', ')}`}>
       <View style={s.bar}>
-        {mins.map((m, i) => {
-          if (m == null) return null;
-          const fill = Math.max(0.06, 1 - m / BAR_WINDOW_MIN);
-          const fillView = <View style={[s.fill, { height: `${fill * 100}%`, backgroundColor: BUS_COLORS[i] }]} />;
+        {fillHeights(mins).map((h, i) => {
+          if (h == null) return null;
+          const m = mins[i];
+          const fillView = (
+            <View style={[s.fill, { height: h, backgroundColor: BUS_COLORS[i] }]}>
+              {m < 1 ? <Bus size={14} weight="bold" color={C.ink} /> : <Text style={s.etaText}>{Math.floor(m)}m</Text>}
+            </View>
+          );
           return i === 0
             ? <Flash key={i} on={m < 1}>{fillView}</Flash>
             : <View key={i} style={StyleSheet.absoluteFill}>{fillView}</View>;
         })}
       </View>
       <Text style={s.barNo}>{service.no}</Text>
-      {mins.map((m, i) => m != null && (
-        <View key={i} style={[s.eta, { backgroundColor: BUS_COLORS[i] }]}>
-          {m < 1 ? <Bus size={14} weight="bold" color={C.ink} /> : <Text style={s.etaText}>{Math.floor(m)}m</Text>}
-        </View>
-      ))}
     </View>
   );
 }
 
-function StopCard({ code, stop, services: raw, color, saved, onToggleStop, onToggleService }) {
+function StopCard({ code, stop, services: raw, color, saved, style, onToggleStop, onToggleService }) {
   const services = Array.isArray(raw) ? raw : [];
   const starred = saved?.services || [];
   const shown = starred.length ? services.filter((x) => starred.includes(x.no)) : services;
+  const [picking, setPicking] = useState(false);
   return (
-    <View style={[s.card, { backgroundColor: color }]}>
-      <View style={s.row}>
-        <View style={{ flex: 1 }}>
+    <View style={[s.card, { backgroundColor: color }, style]}>
+      <View style={[s.row, { flexWrap: 'wrap' }]}>
+        <View style={{ flex: 1, minWidth: 110 }}>
           <Text style={s.cardTitle}>{stop.name}</Text>
           <Text style={s.caption}>{code} · {stop.road}</Text>
         </View>
-        <Btn small color={saved ? C.ink : C.paper} onPress={onToggleStop}>
-          <Text style={[s.label, saved && { color: C.paper }]}>{saved ? 'Saved' : 'Save'}</Text>
-        </Btn>
+        <View style={s.row}>
+          {saved && services.length > 0 && (
+            <IconBtn label={picking ? 'Done choosing buses' : 'Choose which buses to show'} onPress={() => setPicking(!picking)}>
+              <PencilSimple size={18} weight="bold" color={C.ink} />
+            </IconBtn>
+          )}
+          <Btn small color={saved ? C.ink : C.paper} onPress={onToggleStop}>
+            <Text style={[s.label, saved && { color: C.paper }]}>{saved ? 'Saved' : 'Save'}</Text>
+          </Btn>
+        </View>
       </View>
       {raw === undefined && <View style={s.skeleton} />}
       {raw === 'error' && <Text style={s.caption}>Can't reach bus times. Retrying every second.</Text>}
       {Array.isArray(raw) && !raw.length && <Text style={s.caption}>No buses right now.</Text>}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.bars}>
-        {shown.map((svc) => <BusBar key={svc.no} service={svc} />)}
-      </ScrollView>
-      {saved && services.length > 0 && (
+      {shown.length > 0 && (
+        <View style={s.bars}>{shown.map((svc) => <BusBar key={svc.no} service={svc} />)}</View>
+      )}
+      {picking && saved && services.length > 0 && (
         <Text style={s.caption}>Tap buses to show only those</Text>
       )}
-      {saved && services.length > 0 && (
+      {picking && saved && services.length > 0 && (
         <View style={s.chips}>
           {services.map((svc) => {
             const on = starred.includes(svc.no);
@@ -160,6 +192,50 @@ function StopCard({ code, stop, services: raw, color, saved, onToggleStop, onTog
         </View>
       )}
     </View>
+  );
+}
+
+function EditLayout({ saved, onClose, onMove, onRemove }) {
+  return (
+    <Modal transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable style={s.backdrop} onPress={onClose} accessibilityLabel="Close edit layout" />
+      <View style={s.sheet}>
+        <Text style={s.displaySm}>Edit layout</Text>
+        <Text style={s.caption}>Tiles show in this order, left to right.</Text>
+        <ScrollView style={{ maxHeight: 420 }} contentContainerStyle={{ gap: 10, padding: 4 }}>
+          {saved.map((st, i) => (
+            <View key={st.code} style={[s.editRow, { backgroundColor: CARD_COLORS[i % CARD_COLORS.length] }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={s.label} numberOfLines={1}>{st.name}</Text>
+                <Text style={s.caption}>{st.code}</Text>
+              </View>
+              <IconBtn label={`Move ${st.name} up`} disabled={i === 0} onPress={() => onMove(i, -1)}>
+                <ArrowUp size={18} weight="bold" color={C.ink} />
+              </IconBtn>
+              <IconBtn label={`Move ${st.name} down`} disabled={i === saved.length - 1} onPress={() => onMove(i, 1)}>
+                <ArrowDown size={18} weight="bold" color={C.ink} />
+              </IconBtn>
+              <IconBtn label={`Remove ${st.name}`} onPress={() => onRemove(st.code)}>
+                <Trash size={18} weight="bold" color={C.ink} />
+              </IconBtn>
+            </View>
+          ))}
+        </ScrollView>
+        <Btn color={C.ink} onPress={onClose}>
+          <Text style={[s.label, { color: C.paper, textAlign: 'center' }]}>Done</Text>
+        </Btn>
+      </View>
+    </Modal>
+  );
+}
+
+function IconBtn({ children, label, disabled, onPress }) {
+  return (
+    <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled} onPress={onPress}
+      style={({ pressed }) => [s.iconBtn, disabled && { opacity: 0.3 },
+        pressed && { transform: [{ translateX: 2 }, { translateY: 2 }], boxShadow: 'none' }]}>
+      {children}
+    </Pressable>
   );
 }
 
@@ -180,36 +256,52 @@ export default function App() {
   const stops = useStops();
   const [query, setQuery] = useState('');
   const [openCode, setOpenCode] = useState(null);
+  const [editing, setEditing] = useState(false);
+  const { width } = useWindowDimensions();
+  const [gridW, setGridW] = useState(null); // measured, since window width includes the scrollbar
 
   const q = query.trim().toLowerCase();
   const results = q && stops
     ? stops.filter((st) => st.code.startsWith(q) || st.name.toLowerCase().includes(q)).slice(0, 20)
     : [];
-  const savedCodes = Object.keys(saved);
-  const visibleCodes = openCode && !saved[openCode] ? [openCode, ...savedCodes] : savedCodes;
+  const savedCodes = saved.map((st) => st.code);
+  const isSaved = (code) => saved.find((st) => st.code === code);
+  const visibleCodes = openCode && !isSaved(openCode) ? [openCode, ...savedCodes] : savedCodes;
   const arrivals = useArrivals(visibleCodes);
 
+  const removeStop = (code) => updateSaved((p) => p.filter((st) => st.code !== code));
   const toggleStop = (code, stop) =>
-    updateSaved((p) => {
-      if (p[code]) delete p[code];
-      else p[code] = { name: stop.name, road: stop.road, services: [] };
-      return p;
-    });
+    isSaved(code) ? removeStop(code) : updateSaved((p) => [...p, { code, name: stop.name, road: stop.road, services: [] }]);
   const toggleService = (code, no) =>
+    updateSaved((p) => p.map((st) => (st.code !== code ? st
+      : { ...st, services: st.services.includes(no) ? st.services.filter((x) => x !== no) : [...st.services, no] })));
+  const moveStop = (i, dir) =>
     updateSaved((p) => {
-      const list = p[code].services;
-      p[code] = { ...p[code], services: list.includes(no) ? list.filter((x) => x !== no) : [...list, no] };
+      [p[i], p[i + dir]] = [p[i + dir], p[i]];
       return p;
     });
+
+  // Bento: column count from screen width, each tile spans enough columns for its bars.
+  const inner = Math.floor(gridW ?? Math.min(width, 1200) - 32);
+  const cols = inner >= 1000 ? 4 : inner >= 640 ? 3 : 2;
+  const colW = (inner - GAP * (cols - 1)) / cols;
+  const barsPerCol = Math.max(1, Math.floor((colW - 36 + GAP) / BAR_SLOT));
+  const tileStyle = (code, starred) => {
+    const list = Array.isArray(arrivals[code]) ? arrivals[code] : [];
+    const n = starred?.length ? list.filter((x) => starred.includes(x.no)).length : list.length;
+    const span = Math.min(cols, Math.max(1, Math.ceil(n / barsPerCol)));
+    // flexGrow lets the last tile in a row stretch, so rows never leave holes
+    return { flexBasis: span * colW + (span - 1) * GAP, flexGrow: 1 };
+  };
 
   if (!fontsLoaded) return <View style={s.screen} />;
 
   const card = (code, stop, i) => (
     <StopCard key={code} code={code} stop={stop} color={CARD_COLORS[i % CARD_COLORS.length]}
-      services={arrivals[code]} saved={saved[code]}
+      services={arrivals[code]} saved={isSaved(code)} style={tileStyle(code, isSaved(code)?.services)}
       onToggleStop={() => toggleStop(code, stop)} onToggleService={(no) => toggleService(code, no)} />
   );
-  const openStop = openCode && !saved[openCode] && stops?.find((st) => st.code === openCode);
+  const openStop = openCode && !isSaved(openCode) && stops?.find((st) => st.code === openCode);
 
   return (
     <ScrollView style={s.screen} contentContainerStyle={s.content} keyboardShouldPersistTaps="handled">
@@ -232,8 +324,19 @@ export default function App() {
         </Btn>
       ))}
 
-      {openStop && card(openStop.code, openStop, 0)}
-      {savedCodes.map((code, i) => card(code, saved[code], i + 1))}
+      {openStop && <View style={s.bento}>{card(openStop.code, openStop, 0)}</View>}
+      {saved.length > 1 && (
+        <View style={[s.row, { justifyContent: 'space-between', marginTop: 8 }]}>
+          <Text style={s.cardTitle}>Saved stops</Text>
+          <Btn small color={C.butter} onPress={() => setEditing(true)}>
+            <Text style={s.label}>Edit layout</Text>
+          </Btn>
+        </View>
+      )}
+      <View style={s.bento} onLayout={(e) => setGridW(e.nativeEvent.layout.width)}>
+        {saved.map((st, i) => card(st.code, st, i + 1))}
+      </View>
+      {editing && <EditLayout saved={saved} onClose={() => setEditing(false)} onMove={moveStop} onRemove={removeStop} />}
       {!savedCodes.length && !openStop && !q && (
         <Text style={[s.caption, { marginTop: 24 }]}>Search a stop and tap Save to keep it here. Saved stops live only on this phone.</Text>
       )}
@@ -244,7 +347,22 @@ export default function App() {
 const outline = { borderWidth: 2.5, borderColor: C.ink };
 const s = StyleSheet.create({
   screen: { flex: 1, backgroundColor: C.violet },
-  content: { padding: 16, gap: 12, maxWidth: 560, width: '100%', alignSelf: 'center' },
+  content: { padding: 16, gap: GAP, maxWidth: 1200, width: '100%', alignSelf: 'center' },
+  bento: { flexDirection: 'row', flexWrap: 'wrap', gap: GAP, alignItems: 'stretch' },
+  displaySm: { fontFamily: 'Shrikhand_400Regular', fontSize: 28, lineHeight: 34, color: C.ink },
+  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(17,17,17,0.45)' },
+  sheet: {
+    ...outline, position: 'absolute', left: 16, right: 16, bottom: 16, maxWidth: 520, marginHorizontal: 'auto',
+    backgroundColor: C.paper, borderRadius: 28, padding: 20, gap: 12, boxShadow: `4px 4px 0 ${C.ink}`,
+  },
+  editRow: {
+    ...outline, borderRadius: 20, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 8,
+    boxShadow: `2px 2px 0 ${C.ink}`,
+  },
+  iconBtn: {
+    ...outline, width: 40, height: 40, borderRadius: 999, backgroundColor: C.paper,
+    alignItems: 'center', justifyContent: 'center', boxShadow: `2px 2px 0 ${C.ink}`,
+  },
   display: { fontFamily: 'Shrikhand_400Regular', fontSize: 44, lineHeight: 52, color: C.ink, marginTop: 16 },
   cardTitle: { fontFamily: 'SpaceGrotesk_700Bold', fontSize: 20, color: C.ink },
   label: { fontFamily: 'SpaceGrotesk_700Bold', fontSize: 14, color: C.ink },
@@ -260,11 +378,14 @@ const s = StyleSheet.create({
   card: { ...outline, borderRadius: 28, padding: 18, gap: 12, boxShadow: `4px 4px 0 ${C.ink}` },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  bars: { gap: 12, paddingVertical: 4, paddingRight: 4 },
+  bars: { flexDirection: 'row', flexWrap: 'wrap', gap: GAP, paddingVertical: 4 },
   barCol: { alignItems: 'center', gap: 4, width: 58 },
-  bar: { ...outline, width: 52, height: 170, borderRadius: 999, backgroundColor: C.paper, overflow: 'hidden' },
-  fill: { position: 'absolute', bottom: 0, left: 0, right: 0, borderTopWidth: 2.5, borderColor: C.ink, borderRadius: 999 },
+  bar: { ...outline, width: 52, height: BAR_H, borderRadius: 999, backgroundColor: C.paper, overflow: 'hidden' },
+  fill: {
+    // full border (not just top) so the curve keeps an even line; the sides hide under the pill's clip
+    position: 'absolute', bottom: 0, left: -2.5, right: -2.5, borderWidth: 2.5, borderBottomWidth: 0, borderColor: C.ink,
+    borderTopLeftRadius: 999, borderTopRightRadius: 999, alignItems: 'center', paddingTop: 3,
+  },
   barNo: { fontFamily: 'Shrikhand_400Regular', fontSize: 20, color: C.ink },
-  eta: { ...outline, borderWidth: 2, borderRadius: 999, paddingHorizontal: 8, minWidth: 44, alignItems: 'center' },
   etaText: { fontFamily: 'SpaceGrotesk_700Bold', fontSize: 12, color: C.ink },
 });
