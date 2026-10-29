@@ -1,14 +1,15 @@
-"""Measures the map layout from LTA's system map image so our map lines up with it.
+"""Measures the map layout from LTA's system map so our tap points sit on its stations.
 
-Reads data/system-map.png (kept out of git) and the rough positions in build_mrt.POS, then:
-1. classifies each pixel to a line colour,
-2. fits our map frame onto the image (scale + offset) so stations land on their line's colour,
-3. snaps every station onto its line,
-4. traces each line between neighbouring stations along the image's own pixels.
-Writes data/map_layout.json (station positions + per-edge polylines, in our map units),
-which build_mrt.py uses instead of the hand positions. Also writes data/overlay.png to check.
+Reads data/system-map-hi.png (rendered from LTA's SVG by render_svg.mjs, kept out of git), then:
+1. classifies pixels to line colours,
+2. finds every station's code box (the solid rounded boxes, much thicker than the lines),
+3. fits our rough positions (build_mrt.POS) onto those boxes and assigns each station code its box,
+4. traces each line between neighbouring stations along the image's own pixels (for the route view),
+5. exports the cropped map with the background removed to assets/system-map.png (+ a grey copy).
+Writes data/map_layout.json (station positions, per-edge polylines and where the image sits, in our map
+units) for build_mrt.py, and data/overlay.png to check the match by eye.
 
-usage: python scripts/align_map.py
+usage: node scripts/render_svg.mjs && python scripts/align_map.py
 """
 import csv, heapq, json, math, sys
 from pathlib import Path
@@ -19,129 +20,200 @@ from scipy import ndimage, optimize
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'scripts'))
-from build_mrt import LINES, NOT_OPEN, POS, Y_SHIFT  # noqa: E402
+from build_mrt import LINES, NOT_OPEN, POS  # noqa: E402
 
 COLOURS = {  # the system map's line colours
-    'NS': (220, 40, 30), 'EW': (0, 150, 70), 'CG': (0, 150, 70), 'NE': (150, 0, 170),
+    'NS': (220, 40, 30), 'EW': (0, 150, 70), 'NE': (150, 0, 170),
     'CC': (248, 155, 15), 'DT': (10, 75, 165), 'TE': (155, 90, 35),
 }
-UNIQUE = ['NS', 'EW', 'NE', 'CC', 'DT', 'TE']
+UNIQUE = list(COLOURS)
+TRACE_DOWN = 3  # trace lines on a 1/3-size copy; plenty for the route view and much faster
+JOINED = (('TE9', 'TE11'), ('TE20', 'TE22'), ('TE22', 'TE23'))  # across stations that aren't open yet
+Image.MAX_IMAGE_PIXELS = None  # our own render, not untrusted input
+
+
+def line_of(code):
+    pre = code.rstrip('0123456789A')
+    return {'CE': 'CC', 'CG': 'EW'}.get(pre, pre)
 
 
 def classify(img):
     """label each pixel with the nearest line colour index (UNIQUE), or -1"""
-    px = img.astype(int)
+    px = img.astype(np.int32)  # int16 overflows when the colour differences are squared
     sat = px.max(2) - px.min(2)
     d = np.stack([((px - np.array(COLOURS[k])) ** 2).sum(2) for k in UNIQUE])
-    lab = d.argmin(0)
+    lab = d.argmin(0).astype(np.int8)
     lab[(d.min(0) > 70 ** 2) | (sat < 70)] = -1
     return lab
 
 
-def main():
-    img = np.array(Image.open(ROOT / 'data/system-map.png').convert('RGB'))
-    lab = classify(img)
-    masks = {k: lab == i for i, k in enumerate(UNIQUE)}
-    masks['CG'] = masks['EW']
-    dist, near = {}, {}
-    for k, m in masks.items():
-        d, idx = ndimage.distance_transform_edt(~m, return_indices=True)
-        dist[k], near[k] = d, idx
+def code_boxes(mask, k):
+    """centres of the solid code boxes on one line colour (lines are too thin to survive the opening)"""
+    solid = ndimage.binary_closing(mask, structure=np.ones((int(1.5 * k), int(1.5 * k))))  # fill the white code text
+    boxes = ndimage.binary_opening(solid, structure=np.ones((int(2.6 * k), int(2.6 * k))))  # boxes ~3.7k tall, lines ~1.8k
+    lab, n = ndimage.label(boxes)
+    keep = list(range(1, n + 1))
+    if not keep:
+        return np.zeros((0, 2))
+    return np.array(ndimage.center_of_mass(boxes, lab, keep))[:, ::-1]  # (x, y)
 
-    # stations and the lines through them (same joining rules as build_mrt)
-    rows = [r for r in csv.DictReader(open(ROOT / 'data/mrt_travel_times.csv', encoding='utf-8')) if r['Line'] in LINES]
-    pts = []  # (code, line, x, y) in our map units, for every code with a hand position
+
+def line_runs(rows):
+    """each line as runs of station codes in order, split where the line branches"""
+    adj = {}
     for r in rows:
-        line = LINES[r['Line']][0]
-        for c in (r['From Code'] + '/' + r['To Code']).split('/'):
-            pre = c.rstrip('0123456789A')
-            ln = {'CE': 'CC'}.get(pre, pre)
-            if c in POS and c not in NOT_OPEN and ln in COLOURS:
-                pts.append((c, 'EW' if ln == 'CG' else ln, *POS[c]))
-    pts = list({p[0]: p for p in pts}.values())
+        ln = LINES[r['Line']][0]
+        pick = lambda cs: next((c for c in cs.split('/') if c in POS and line_of(c) == ('EW' if ln == 'CG' else ln)), None)
+        a, b = pick(r['From Code']), pick(r['To Code'])
+        if a and b:
+            adj.setdefault(ln, {}).setdefault(a, []).append(b)
+            adj[ln].setdefault(b, []).append(a)
+    for a, b in JOINED:
+        adj['TE'].setdefault(a, []).append(b)
+        adj['TE'].setdefault(b, []).append(a)
+    out = []
+    for ln, g in adj.items():
+        for n in list(g):  # drop unopened stations, already joined across
+            if n in NOT_OPEN:
+                for o in g.pop(n):
+                    g[o].remove(n)
+        used = set()
+        for s in [n for n in g if len(g[n]) != 2]:
+            for nxt in g[s]:
+                if frozenset((s, nxt)) in used:
+                    continue
+                run = [s, nxt]
+                used.add(frozenset((s, nxt)))
+                while len(g[run[-1]]) == 2:
+                    step = next((x for x in g[run[-1]] if frozenset((run[-1], x)) not in used), None)
+                    if step is None:
+                        break
+                    used.add(frozenset((run[-1], step)))
+                    run.append(step)
+                out.append((ln, run))
+    return out
 
-    H, W = lab.shape
+
+def main():
+    img = np.array(Image.open(ROOT / 'data/system-map-hi.png').convert('RGB'))
+    H, W = img.shape[:2]
+    k = W / 554  # sizes below were measured on the 554px copy
+    lab = classify(img)
+    masks = {c: lab == i for i, c in enumerate(UNIQUE)}
+    boxes = {c: code_boxes(m, k) for c, m in masks.items()}
+    print('code boxes found:', {c: len(b) for c, b in boxes.items()})
+
+    rows = [r for r in csv.DictReader(open(ROOT / 'data/mrt_travel_times.csv', encoding='utf-8')) if r['Line'] in LINES]
+    codes = sorted({c for r in rows for c in (r['From Code'] + '/' + r['To Code']).split('/')
+                    if c in POS and c not in NOT_OPEN and line_of(c) in COLOURS})
+    P = np.array([POS[c] for c in codes], float)
+
+    # fit x/y scale + offset: grid search on a 1/3-size copy, scoring how close every code lands to
+    # its line's colour, then refine
+    D = TRACE_DOWN
+    dist = {c: np.minimum(ndimage.distance_transform_edt(~m[::D, ::D]), 15 * k / D) for c, m in masks.items()}
+    cols = np.array([UNIQUE.index(line_of(c)) for c in codes])
+    stack = np.stack([dist[c] for c in UNIQUE])
+    hh, ww = stack.shape[1:]
 
     def cost(v):
-        s, tx, ty = v
-        total = 0.0
-        for _, ln, x, y in pts:
-            ix, iy = x * s + tx, y * s + ty
-            if not (0 <= ix < W and 0 <= iy < H):
-                return 1e9
-            total += min(dist[ln][int(iy), int(ix)], 15) ** 2
-        return total / len(pts)
+        sx_, sy_, tx_, ty_ = v
+        ix = ((P[:, 0] * sx_ + tx_) / D).astype(int)
+        iy = ((P[:, 1] * sy_ + ty_) / D).astype(int)
+        if ix.min() < 0 or iy.min() < 0 or ix.max() >= ww or iy.max() >= hh:
+            return 1e9
+        return float((stack[cols, iy, ix] ** 2).mean())
 
-    # coarse grid over scale and offset, then refine (works for any copy of the map: scale ~ width / 1700)
     best = None
-    k = W / 554
-    for s in np.linspace(0.28, 0.36, 17) * k:
-        for tx in np.arange(-40, 41, 4) * k:
-            for ty in np.arange(-80, 21, 4) * k:
-                c = cost((s, tx, ty))
-                if best is None or c < best[0]:
-                    best = (c, (s, tx, ty))
-    res = optimize.minimize(cost, best[1], method='Nelder-Mead', options={'xatol': 1e-4, 'fatol': 1e-3})
-    s, tx, ty = res.x
-    print(f'fit: scale {s:.4f}, offset ({tx:.1f}, {ty:.1f}), mean sq px error {res.fun:.2f}')
-    to_img = lambda x, y: (x * s + tx, y * s + ty)
-    to_map = lambda ix, iy: ((ix - tx) / s, (iy - ty) / s)
+    for s_ in np.linspace(0.26, 0.38, 25) * k:
+        for ar in np.linspace(0.94, 1.06, 7):
+            for tx_ in np.arange(-60, 90, 6) * k:
+                for ty_ in np.arange(-60, 90, 6) * k:
+                    c_ = cost((s_, s_ * ar, tx_, ty_))
+                    if best is None or c_ < best[0]:
+                        best = (c_, (s_, s_ * ar, tx_, ty_))
+    res = optimize.minimize(cost, best[1], method='Nelder-Mead', options={'xatol': 1e-4, 'fatol': 1e-4, 'maxiter': 4000})
+    sx, sy, tx, ty = res.x
+    pred = np.c_[P[:, 0] * sx + tx, P[:, 1] * sy + ty]
+    print(f'fit: scale ({sx:.4f}, {sy:.4f}), offset ({tx:.1f}, {ty:.1f}), '
+          f'rms {math.sqrt(res.fun) * D / k:.2f} (554px units)')
 
-    # snap each code onto its line's nearest pixel
-    snapped = {}
-    worst = []
-    for c, ln, x, y in pts:
-        ix, iy = to_img(x, y)
-        j, i = int(round(iy)), int(round(ix))
-        ny, nx = near[ln][0][j, i], near[ln][1][j, i]
-        worst.append((dist[ln][j, i], c))
-        snapped[c] = to_map(nx + 0.5, ny + 0.5)
-    worst.sort(reverse=True)
-    print('furthest snaps (px):', [(c, round(d, 1)) for d, c in worst[:8]])
-    # trace every edge along its line's pixels between the two snapped stations
-    near_line = {k: ndimage.binary_dilation(m, iterations=1) for k, m in masks.items()}
-    edges = {}
+    # one box per code. LTA shifts parts of the layout between map versions, so one fit isn't enough:
+    # assign each code its nearest free box of its colour, nudge every guess by how its neighbours
+    # moved, and repeat until the guesses settle
+    to_map = lambda ix, iy: ((ix - tx) / sx, (iy - ty) / sy)
+    to_img = lambda x, y: (x * sx + tx, y * sy + ty)
+    small = {c: ndimage.binary_dilation(m[::TRACE_DOWN, ::TRACE_DOWN], iterations=1) for c, m in masks.items()}
+    in_map = lambda B: B[(B[:, 1] > 59 * k) & (B[:, 1] < 446 * k)] if len(B) else B  # no header or legend
+    boxes = {c: in_map(b) for c, b in boxes.items()}
+    guess = pred.copy()
+    for it in range(8):
+        at = np.zeros_like(guess)
+        for colour in UNIQUE:
+            idx = np.where(np.array([line_of(c) for c in codes]) == colour)[0]
+            B = boxes[colour]
+            cost = np.hypot(guess[idx, None, 0] - B[None, :, 0], guess[idx, None, 1] - B[None, :, 1])
+            ri, ci = optimize.linear_sum_assignment(cost)
+            at[idx[ri]] = B[ci]
+        move = at - guess
+        near = np.argsort(np.hypot(guess[:, None, 0] - guess[None, :, 0], guess[:, None, 1] - guess[None, :, 1]), 1)[:, :7]
+        step = np.median(move[near], axis=1)
+        guess = guess + step
+        print(f'  pass {it + 1}: median move {np.median(np.hypot(*move.T)) / k:.2f}, max {np.hypot(*move.T).max() / k:.1f}')
+    at_px = dict(zip(codes, at))
+    far = sorted(((np.hypot(*(at[i] - guess[i])) / k, c) for i, c in enumerate(codes)), reverse=True)
+    print('far from their settled guess (554px units):', [(c, round(d, 1)) for d, c in far if d > 5])
+    snapped = {c: to_map(*p) for c, p in at_px.items()}
+
+    # trace each edge along its line on a smaller copy
+    to_small = lambda x, y: tuple(v / TRACE_DOWN for v in to_img(x, y))
+    from_small = lambda ix, iy: to_map(ix * TRACE_DOWN, iy * TRACE_DOWN)
+    pairs = []
     for r in rows:
-        line = LINES[r['Line']][0]
-        ln = 'EW' if line == 'CG' else line
-        pick = lambda codes: next((c for c in codes.split('/') if c in snapped and
-                                   {'CE': 'CC', 'CG': 'EW'}.get(c.rstrip('0123456789A'), c.rstrip('0123456789A')) == ln), None)
+        ln = 'EW' if LINES[r['Line']][0] == 'CG' else LINES[r['Line']][0]
+        pick = lambda cs: next((c for c in cs.split('/') if c in snapped and line_of(c) == ln), None)
         a, b = pick(r['From Code']), pick(r['To Code'])
-        if not a or not b:
-            continue  # unopened station: its two neighbours get traced directly below
-        edges[f'{a}|{b}'] = trace(near_line[ln], to_img(*snapped[a]), to_img(*snapped[b]), to_map)
-    # joined across unopened stations, as in build_mrt
-    for a, b in (('TE9', 'TE11'), ('TE20', 'TE22'), ('TE22', 'TE23')):
-        edges[f'{a}|{b}'] = trace(near_line['TE'], to_img(*snapped[a]), to_img(*snapped[b]), to_map)
+        if a and b:
+            pairs.append((a, b, ln))
+    pairs += [(a, b, 'TE') for a, b in JOINED]
+    edges = {f'{a}|{b}': trace(small[ln], to_small(*snapped[a]), to_small(*snapped[b]), from_small, 30 * k / TRACE_DOWN)
+             for a, b, ln in pairs}
 
     # the map itself: header and legend cropped off, sea and island background made transparent
-    k = W / 554
     x0, y0, x1, y1 = int(4 * k), int(59 * k), int(550 * k), int(446 * k)
-    crop = img[y0:y1, x0:x1].astype(int)
-    bg = np.array([[216, 236, 244], [252, 252, 252]])
+    crop = img[y0:y1, x0:x1].astype(np.int32)
+    bg = np.array([[216, 236, 244], [252, 252, 252], [255, 255, 255]], dtype=np.int32)
     d = np.sqrt(((crop[:, :, None, :] - bg[None, None]) ** 2).sum(3)).min(2)
     alpha = np.clip((d - 10) * 255 / 34, 0, 255).astype(np.uint8)  # soft edge so text stays anti-aliased
     out = Image.fromarray(np.dstack([crop.astype(np.uint8), alpha]))
-    out = out.resize((out.width * 2, out.height * 2), Image.LANCZOS)  # smoother edges when scaled up
-    out.save(ROOT / 'assets/system-map.png', optimize=True)
+    f = 2600 / out.width  # about 2600px wide: sharp at the biggest zoom
+    out = out.resize((round(out.width * f), round(out.height * f)), Image.LANCZOS)
+    out.quantize(256, method=Image.Quantize.FASTOCTREE).save(ROOT / 'assets/system-map.png', optimize=True)
+    # a light grey copy, shown under the route so everything off the route fades back
+    ga = np.array(out)
+    lum = ga[..., :3].astype(float) @ [0.299, 0.587, 0.114]
+    ga[..., :3] = (255 - (255 - lum) * 0.3)[..., None].astype(np.uint8)
+    Image.fromarray(ga).quantize(64, method=Image.Quantize.FASTOCTREE).save(ROOT / 'assets/system-map-grey.png', optimize=True)
     mx, my = to_map(x0, y0)
-    image = {'x': round(mx, 1), 'y': round(my, 1), 'w': round((x1 - x0) / s, 1), 'h': round((y1 - y0) / s, 1)}
+    image = {'x': round(mx, 1), 'y': round(my, 1), 'w': round((x1 - x0) / sx, 1), 'h': round((y1 - y0) / sy, 1)}
 
-    json.dump({'scale': s, 'tx': tx, 'ty': ty, 'image': image, 'codes': snapped, 'edges': edges},
+    json.dump({'scale': [sx, sy], 'offset': [tx, ty], 'image': image,
+               'codes': {c: [round(x, 1), round(y, 1)] for c, (x, y) in snapped.items()}, 'edges': edges},
               open(ROOT / 'data/map_layout.json', 'w'), indent=1)
 
-    # overlay: our traced lines and stations on the reference, to check by eye
-    ov = Image.fromarray(img).resize((W * 3, H * 3), Image.LANCZOS).convert('RGB')
+    # overlay to check by eye: traced lines and our station points on the reference
+    z = 1200 / W
+    ov = Image.fromarray(img).resize((1200, 1200), Image.LANCZOS)
     dr = ImageDraw.Draw(ov)
     for poly in edges.values():
-        dr.line([(to_img(x, y)[0] * 3, to_img(x, y)[1] * 3) for x, y in poly], fill=(0, 0, 0), width=2)
-    for c, (x, y) in snapped.items():
-        ix, iy = to_img(x, y)
-        dr.ellipse([ix * 3 - 4, iy * 3 - 4, ix * 3 + 4, iy * 3 + 4], outline=(0, 0, 0), width=2)
+        dr.line([tuple(v * z for v in to_img(x, y)) for x, y in poly], fill=(0, 0, 0), width=2)
+    for x, y in snapped.values():
+        ix, iy = (v * z for v in to_img(x, y))
+        dr.ellipse([ix - 4, iy - 4, ix + 4, iy + 4], outline=(0, 0, 0), width=2)
     ov.save(ROOT / 'data/overlay.png')
 
 
-def trace(mask, a, b, to_map, margin=30):
+def trace(mask, a, b, to_map, margin):
     """cheapest 8-connected pixel path from a to b, preferring the line's own pixels"""
     H, W = mask.shape
     x0, x1 = int(max(0, min(a[0], b[0]) - margin)), int(min(W - 1, max(a[0], b[0]) + margin))
