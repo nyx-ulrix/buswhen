@@ -1,5 +1,5 @@
 // Network-first app shell so the app opens offline; bus APIs are never cached.
-const CACHE = 'buswhen-v1';
+const CACHE = 'reachwhen-v1';
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 self.addEventListener('fetch', (e) => {

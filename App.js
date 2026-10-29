@@ -5,19 +5,15 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFonts, Shrikhand_400Regular } from '@expo-google-fonts/shrikhand';
 import { SpaceGrotesk_500Medium, SpaceGrotesk_700Bold } from '@expo-google-fonts/space-grotesk';
-import { BookmarkSimple, Bus, MagnifyingGlass, PencilSimple, Trash } from 'phosphor-react-native';
+import { BookmarkSimple, Bus, MagnifyingGlass, PencilSimple, TrainSimple, Trash } from 'phosphor-react-native';
+import { Btn, C, CARD_COLORS, GAP, IconBtn, base } from './ui';
+import MrtPage from './MrtPage';
 
-const C = {
-  ink: '#111111', paper: '#FFFDF5', violet: '#A98BF5', peach: '#FFB86B', lime: '#C8F169',
-  coral: '#FF6B4A', pink: '#F7A8D8', sky: '#7EC8F0', butter: '#FFE066', grey: '#5C5C5C',
-};
 const BUS_COLORS = [C.coral, C.sky, C.lime]; // arriving bus, 2nd, 3rd
-const CARD_COLORS = [C.peach, C.pink, C.butter]; // max 3 per screen, none shared with bar fills
 const BAR_WINDOW_MIN = 30; // a bus fills its bar from 30 min out to 0
 const STOPS_URL = 'https://data.busrouter.sg/v1/stops.min.json';
 const ARRIVALS_URL = 'https://arrivelah2.busrouter.sg/?id=';
 const STORE_KEY = 'buswhen.saved';
-const GAP = 12;
 // Sized so a half-width tile on a 360px phone fits 3 bars: (360-32-12)/2 = 158 >= 3*38 + 2*8 + CARD_PAD
 const BAR_W = 38;
 const BAR_GAP = 8;
@@ -166,7 +162,10 @@ function BusBar({ service, k }) {
 }
 
 function StopCard({ code, stop, services: raw, color, saved, tileW, k, onToggleStop, onToggleService }) {
-  const services = Array.isArray(raw) ? raw : [];
+  // the API sorts bus numbers as text (106, 14, 16); sort them as numbers (14, 16, 106, 972, 972M)
+  const services = Array.isArray(raw)
+    ? [...raw].sort((a, b) => a.no.localeCompare(b.no, undefined, { numeric: true }))
+    : [];
   const starred = saved?.services || [];
   const shown = starred.length ? services.filter((x) => starred.includes(x.no)) : services;
   const [picking, setPicking] = useState(false);
@@ -324,30 +323,7 @@ function EditLayout({ saved, inner, widthOf, onClose, onReorder, onRemove }) {
   );
 }
 
-function IconBtn({ children, label, disabled, active, onPress }) {
-  return (
-    <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected: !!active }} hitSlop={6}
-      disabled={disabled} onPress={onPress}
-      style={({ pressed }) => [s.iconBtn, disabled && { opacity: 0.3 }, active && { backgroundColor: C.ink },
-        pressed && { transform: [{ translateX: 2 }, { translateY: 2 }], boxShadow: 'none' }]}>
-      {children}
-    </Pressable>
-  );
-}
-
-function Btn({ children, color = C.paper, small, onPress }) {
-  return (
-    <Pressable onPress={onPress} style={({ pressed }) => [
-      small ? s.chip : s.btn, { backgroundColor: color },
-      pressed && { transform: [{ translateX: 2 }, { translateY: 2 }], boxShadow: `1px 1px 0 ${C.ink}` },
-    ]}>
-      {children}
-    </Pressable>
-  );
-}
-
-export default function App() {
-  const [fontsLoaded] = useFonts({ Shrikhand_400Regular, SpaceGrotesk_500Medium, SpaceGrotesk_700Bold });
+function BusPage() {
   const [saved, updateSaved] = useSaved();
   const stops = useStops();
   const [query, setQuery] = useState('');
@@ -393,8 +369,6 @@ export default function App() {
   const widthOf = (code) =>
     Math.min(inner, Math.max(MIN_TILE * k, (barsOf(code) * BAR_SLOT - BAR_GAP) * k + CARD_PAD));
 
-  if (!fontsLoaded) return <View style={s.screen} />;
-
   const card = (code, stop, i) => (
     <StopCard key={code} code={code} stop={stop} color={CARD_COLORS[i % CARD_COLORS.length]}
       services={arrivals[code]} saved={isSaved(code)} tileW={widthOf(code)} k={k}
@@ -403,10 +377,7 @@ export default function App() {
   const openStop = openCode && !isSaved(openCode) && stops?.find((st) => st.code === openCode);
 
   return (
-    <ScrollView style={s.screen} contentContainerStyle={s.content} keyboardShouldPersistTaps="handled">
-      <Text style={s.display}>Bus When?</Text>
-      <Text style={s.caption}>Live arrivals, updated every second ✱</Text>
-
+    <>
       <Text style={s.label} nativeID="searchLabel">Find a stop</Text>
       <View style={s.search}>
         <MagnifyingGlass size={20} weight="bold" color={C.ink} />
@@ -442,21 +413,48 @@ export default function App() {
       {!savedCodes.length && !openStop && !q && (
         <Text style={[s.caption, { marginTop: 24 }]}>Search a stop and tap the bookmark to keep it here. Saved stops live only on this phone.</Text>
       )}
+    </>
+  );
+}
+
+// Page lives in the URL hash on the web (#mrt), so Back and bookmarks work.
+function usePage() {
+  const web = typeof window !== 'undefined' && !!window.location;
+  const read = () => (web && window.location.hash === '#mrt' ? 'mrt' : 'bus');
+  const [page, setPage] = useState(read);
+  useEffect(() => {
+    if (!web) return;
+    const on = () => setPage(read());
+    window.addEventListener('hashchange', on);
+    return () => window.removeEventListener('hashchange', on);
+  }, []);
+  const go = (p) => (web ? (window.location.hash = p === 'mrt' ? 'mrt' : '') : setPage(p));
+  return [page, go];
+}
+
+export default function App() {
+  const [fontsLoaded] = useFonts({ Shrikhand_400Regular, SpaceGrotesk_500Medium, SpaceGrotesk_700Bold });
+  const [page, go] = usePage();
+  if (!fontsLoaded) return <View style={s.screen} />;
+  const mrt = page === 'mrt';
+  return (
+    <ScrollView style={s.screen} contentContainerStyle={s.content} keyboardShouldPersistTaps="handled">
+      <View style={[s.row, { justifyContent: 'space-between', marginTop: 16 }]}>
+        <Text style={[s.display, { flexShrink: 1 }]}>Reach When?</Text>
+        <IconBtn size={48} label={mrt ? 'Bus arrivals' : 'MRT route, time and fare'} onPress={() => go(mrt ? 'bus' : 'mrt')}>
+          {mrt ? <Bus size={24} weight="bold" color={C.ink} /> : <TrainSimple size={24} weight="bold" color={C.ink} />}
+        </IconBtn>
+      </View>
+      <Text style={s.caption}>{mrt ? 'MRT route, time and fare ✱' : 'Live bus arrivals, updated every second ✱'}</Text>
+      {mrt ? <MrtPage /> : <BusPage />}
     </ScrollView>
   );
 }
 
 const outline = { borderWidth: 2.5, borderColor: C.ink };
 const s = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: C.violet },
-  content: { padding: 16, gap: GAP, maxWidth: 1200, width: '100%', alignSelf: 'center' },
+  ...base,
   bento: { flexDirection: 'row', flexWrap: 'wrap', gap: GAP, alignItems: 'flex-start' },
-  displaySm: { fontFamily: 'Shrikhand_400Regular', fontSize: 28, lineHeight: 34, color: C.ink },
-  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(17,17,17,0.45)' },
-  sheet: {
-    ...outline, position: 'absolute', left: 16, right: 16, bottom: 16, maxWidth: 640, marginHorizontal: 'auto',
-    backgroundColor: C.paper, borderRadius: 28, padding: 20, gap: 12, boxShadow: `4px 4px 0 ${C.ink}`,
-  },
   miniGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: MINI_GAP, padding: 4, alignItems: 'flex-start' },
   miniTile: {
     borderWidth: 2, borderColor: C.ink, borderRadius: 16, padding: 8, gap: 6, minHeight: 84,
@@ -468,25 +466,7 @@ const s = StyleSheet.create({
     borderWidth: 1.5, borderColor: C.ink, borderRadius: 999, width: 22, height: 22,
     alignItems: 'center', justifyContent: 'center', backgroundColor: C.paper,
   },
-  iconBtn: {
-    ...outline, width: 32, height: 32, borderRadius: 999, backgroundColor: C.paper,
-    alignItems: 'center', justifyContent: 'center', boxShadow: `2px 2px 0 ${C.ink}`,
-  },
-  display: { fontFamily: 'Shrikhand_400Regular', fontSize: 44, lineHeight: 52, color: C.ink, marginTop: 16 },
-  cardTitle: { fontFamily: 'SpaceGrotesk_700Bold', fontSize: 17, lineHeight: 21, color: C.ink },
-  label: { fontFamily: 'SpaceGrotesk_700Bold', fontSize: 14, color: C.ink },
-  caption: { fontFamily: 'SpaceGrotesk_500Medium', fontSize: 12, color: C.ink },
-  search: {
-    ...outline, borderRadius: 999, backgroundColor: C.paper, paddingHorizontal: 18, flexDirection: 'row',
-    alignItems: 'center', gap: 10, boxShadow: `4px 4px 0 ${C.ink}`,
-  },
-  searchInput: { flex: 1, paddingVertical: 14, fontFamily: 'SpaceGrotesk_500Medium', fontSize: 16, color: C.ink, outlineStyle: 'none' },
   skeleton: { height: BAR_H, width: BAR_W, borderRadius: 999, borderWidth: 2.5, borderColor: C.ink, borderStyle: 'dashed', opacity: 0.4 },
-  btn: { ...outline, borderRadius: 24, paddingHorizontal: 20, paddingVertical: 12, boxShadow: `4px 4px 0 ${C.ink}` },
-  chip: { ...outline, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 6, boxShadow: `2px 2px 0 ${C.ink}` },
-  card: { ...outline, borderRadius: 20, padding: 10, gap: 10, boxShadow: `4px 4px 0 ${C.ink}` },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   bars: { flexDirection: 'row', flexWrap: 'wrap', gap: BAR_GAP, paddingVertical: 4 },
   barCol: { alignItems: 'center', gap: 4, width: BAR_W },
   bar: { ...outline, width: BAR_W, height: BAR_H, borderRadius: 999, backgroundColor: C.paper, overflow: 'hidden' },

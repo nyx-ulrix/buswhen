@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "Bus When?",
-    "slug": "buswhen",
+    "name": "Reach When?",
+    "slug": "reachwhen",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -20,7 +20,7 @@
     "web": {
       "favicon": "./assets/favicon.png",
       "output": "single",
-      "name": "Bus When?",
+      "name": "Reach When?",
       "themeColor": "#A98BF5",
       "backgroundColor": "#A98BF5"
     },
