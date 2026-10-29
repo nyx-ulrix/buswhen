@@ -150,7 +150,7 @@ function BusBar({ service, k }) {
             <View style={[s.fill, { height: h, backgroundColor: BUS_COLORS[i], paddingTop: 7 * k }]}>
               {m < 1 ? <Bus size={14 * k} weight="bold" color={C.ink} /> : (
                 <Text style={[s.etaText, { fontSize: 12 * k, lineHeight: 12 * k }]}>
-                  {Math.floor(m)}{'\n'}<Text style={[s.etaUnit, { fontSize: 9 * k, lineHeight: 10 * k }]}>min</Text>
+                  {Math.floor(m)}{'\n'}<Text style={[s.etaUnit, { fontSize: 6.3 * k, lineHeight: 7 * k }]}>min</Text>
                 </Text>
               )}
             </View>
@@ -497,5 +497,5 @@ const s = StyleSheet.create({
   },
   barNo: { fontFamily: 'Shrikhand_400Regular', fontSize: 16, color: C.ink, textAlign: 'center', width: BAR_W + BAR_GAP },
   etaText: { fontFamily: 'SpaceGrotesk_700Bold', fontSize: 12, lineHeight: 12, color: C.ink, textAlign: 'center' },
-  etaUnit: { fontFamily: 'SpaceGrotesk_500Medium', fontSize: 9, lineHeight: 10 },
+  etaUnit: { fontFamily: 'SpaceGrotesk_500Medium', fontSize: 6.3, lineHeight: 7 },
 });
