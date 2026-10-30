@@ -130,23 +130,30 @@ function Flash({ on, children }) {
   return <Animated.View style={[StyleSheet.absoluteFill, { opacity: v }]}>{children}</Animated.View>;
 }
 
-// Fill heights in px, nearest bus tallest. Each fill keeps LABEL_ROOM px above the one in front
-// so the time printed at its top edge stays readable even when buses bunch up.
+// Fill heights in px show time left: the nearest bus is the shortest fill (in front) and drains as
+// it approaches. Each later fill keeps LABEL_ROOM px above the one in front so every time printed
+// at a fill's top edge stays readable, and they're pushed back down if they'd overflow the pill.
 const BAR_H = 170;
 const LABEL_ROOM = 32; // two-line label: number over "min"
 function fillHeights(mins, k) {
   const out = [null, null, null];
-  let floor = 10 * k; // lowest fill is at least 42px (at k=1), enough for a full dome
-  for (let i = 2; i >= 0; i--) {
+  const top = BAR_H * k;
+  let prev = 0;
+  for (let i = 0; i < 3; i++) {
     if (mins[i] == null) continue;
-    const raw = (1 - mins[i] / BAR_WINDOW_MIN) * BAR_H * k;
-    out[i] = Math.min(BAR_H * k, Math.max(raw, floor + LABEL_ROOM * k));
-    floor = out[i];
+    out[i] = Math.max((mins[i] / BAR_WINDOW_MIN) * top, prev ? prev + LABEL_ROOM * k : 42 * k); // 42: a full dome
+    prev = out[i];
+  }
+  let cap = top;
+  for (let i = 2; i >= 0; i--) {
+    if (out[i] == null) continue;
+    out[i] = Math.min(out[i], cap);
+    cap = out[i] - LABEL_ROOM * k;
   }
   return out;
 }
 
-// One pill per service: the 3 upcoming buses as stacked fills, nearest = tallest, drawn first.
+// One pill per service: the 3 upcoming buses as stacked fills, nearest = shortest, drawn in front.
 // k scales every bar dimension so bars grow with the screen.
 function BusBar({ service, k }) {
   // the API occasionally lists a later bus first, so order by arrival time
@@ -157,7 +164,7 @@ function BusBar({ service, k }) {
     <View style={[s.barCol, { width: BAR_W * k }]} accessible
       accessibilityLabel={`Bus ${service.no}: ${mins.filter((m) => m != null).map((m) => (m < 1 ? 'arriving' : `${Math.floor(m)} min`)).join(', ') || 'no timing right now'}`}>
       <View style={[s.bar, { width: BAR_W * k, height: BAR_H * k }]}>
-        {fillHeights(mins, k).map((h, i) => {
+        {fillHeights(mins, k).map((h, i) => [h, i]).reverse().map(([h, i]) => { // furthest drawn first, at the back
           if (h == null) return null;
           const m = mins[i];
           const fillView = (
@@ -385,6 +392,7 @@ function BusPage() {
 
   // Masonry: equal-width columns (each fits 3 bars, so a 360px phone has two), every tile goes in
   // whichever column is shortest so far, in saved order. Gaps are the same everywhere.
+  // widthOf is defined below, once we know how many buses fit one column.
   const inner = Math.floor(gridW ?? Math.min(width, 1200) - 32);
   const barsOf = (code) => {
     const list = Array.isArray(servicesAt(code)) ? servicesAt(code) : [];
@@ -395,20 +403,29 @@ function BusPage() {
   const k = Math.min(1.6, Math.max(1, inner / 328));
   const cols = Math.max(1, Math.floor((inner + GAP) / ((3 * BAR_SLOT - BAR_GAP) * k + CARD_PAD + GAP)));
   const colW = Math.floor((inner - GAP * (cols - 1)) / cols);
-  const widthOf = () => colW;
   const perRow = Math.max(1, Math.floor((colW - CARD_PAD + BAR_GAP * k) / (BAR_SLOT * k)));
   // ponytail: estimated tile height (header + rows of bars) to balance columns; measure if it drifts
   const heightOf = (code) => 90 + Math.ceil(Math.max(1, barsOf(code)) / perRow) * (BAR_H + 34) * k;
-  const columns = Array.from({ length: cols }, () => ({ h: 0, tiles: [] }));
+  // a stop with more buses than one column fits takes its own full-width row instead of stacking
+  const wide = (code) => cols > 1 && barsOf(code) > perRow;
+  const widthOf = (code) => (wide(code) ? inner : colW);
+  const blocks = []; // runs of masonry columns, broken by full-width rows
+  let run = null;
   saved.forEach((st, i) => {
-    const c = columns.reduce((a, b) => (b.h < a.h ? b : a));
+    if (wide(st.code)) {
+      blocks.push({ wide: [st, i] });
+      run = null;
+      return;
+    }
+    if (!run) blocks.push(run = { columns: Array.from({ length: cols }, () => ({ h: 0, tiles: [] })) });
+    const c = run.columns.reduce((a, b) => (b.h < a.h ? b : a));
     c.tiles.push([st, i]);
     c.h += heightOf(st.code) + GAP;
   });
 
-  const card = (code, stop, i) => (
+  const card = (code, stop, i, tileW = widthOf(code)) => (
     <StopCard key={code} code={code} stop={stop} color={CARD_COLORS[i % CARD_COLORS.length]}
-      services={servicesAt(code)} saved={isSaved(code)} tileW={widthOf(code)} k={k}
+      services={servicesAt(code)} saved={isSaved(code)} tileW={tileW} k={k}
       onToggleStop={() => toggleStop(code, stop)} onToggleService={(no) => toggleService(code, no)} />
   );
   const openStop = openCode && !isSaved(openCode) && stops?.find((st) => st.code === openCode);
@@ -431,7 +448,8 @@ function BusPage() {
         </Btn>
       ))}
 
-      {openStop && <View style={s.bento}>{card(openStop.code, openStop, 0)}</View>}
+      {/* a stop you've just searched gets the full width; saved stops sit in the columns */}
+      {openStop && card(openStop.code, openStop, 0, inner)}
       {saved.length > 1 && (
         <View style={[s.row, { justifyContent: 'space-between', marginTop: 8 }]}>
           <Text style={s.cardTitle}>Saved stops</Text>
@@ -440,10 +458,14 @@ function BusPage() {
           </Btn>
         </View>
       )}
-      <View style={s.bento} onLayout={(e) => setGridW(e.nativeEvent.layout.width)}>
-        {columns.map((c, ci) => (
-          <View key={ci} style={s.column}>{c.tiles.map(([st, i]) => card(st.code, st, i + 1))}</View>
-        ))}
+      <View style={s.column} onLayout={(e) => setGridW(e.nativeEvent.layout.width)}>
+        {blocks.map((b, bi) => (b.wide ? card(b.wide[0].code, b.wide[0], b.wide[1] + 1) : (
+          <View key={bi} style={s.bento}>
+            {b.columns.map((c, ci) => (
+              <View key={ci} style={s.column}>{c.tiles.map(([st, i]) => card(st.code, st, i + 1))}</View>
+            ))}
+          </View>
+        )))}
       </View>
       {editing && (
         <EditLayout saved={saved} inner={inner} widthOf={widthOf}
