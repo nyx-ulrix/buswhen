@@ -5,7 +5,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFonts, Shrikhand_400Regular } from '@expo-google-fonts/shrikhand';
 import { SpaceGrotesk_500Medium, SpaceGrotesk_700Bold } from '@expo-google-fonts/space-grotesk';
-import { BookmarkSimple, Bus, MagnifyingGlass, PencilSimple, TrainSimple, Trash } from 'phosphor-react-native';
+import { BookmarkSimple, Bus, Crosshair, MagnifyingGlass, PencilSimple, TrainSimple, Trash } from 'phosphor-react-native';
 import { Btn, C, CARD_COLORS, GAP, IconBtn, base } from './ui';
 import MrtPage from './MrtPage';
 
@@ -52,7 +52,7 @@ function useStops() {
   useEffect(() => {
     fetch(STOPS_URL)
       .then((r) => r.json())
-      .then((d) => setStops(Object.entries(d).map(([code, [, , name, road]]) => ({ code, name, road }))))
+      .then((d) => setStops(Object.entries(d).map(([code, [lng, lat, name, road]]) => ({ code, name, road, lng, lat }))))
       .catch(() => setStops([]));
   }, []);
   return stops;
@@ -348,10 +348,18 @@ function EditLayout({ saved, inner, widthOf, onClose, onReorder, onRemove }) {
   );
 }
 
+// metres between two lat/lng points (equirectangular, plenty at Singapore distances)
+function metres(lat1, lng1, lat2, lng2) {
+  const r = Math.PI / 180;
+  const x = (lng2 - lng1) * r * Math.cos(((lat1 + lat2) / 2) * r), y = (lat2 - lat1) * r;
+  return Math.round(Math.hypot(x, y) * 6371000);
+}
+
 function BusPage() {
   const [saved, updateSaved] = useSaved();
   const stops = useStops();
   const [query, setQuery] = useState('');
+  const [here, setHere] = useState(null); // null | 'locating' | error text | { lat, lng }, never leaves the phone
   const [openCode, setOpenCode] = useState(null);
   const [editing, setEditing] = useState(false);
   const { width } = useWindowDimensions();
@@ -360,7 +368,18 @@ function BusPage() {
   const q = query.trim().toLowerCase();
   const results = q && stops
     ? stops.filter((st) => st.code.startsWith(q) || st.name.toLowerCase().includes(q)).slice(0, 20)
-    : [];
+    : here?.lat != null && stops
+      ? stops.map((st) => ({ ...st, m: metres(here.lat, here.lng, st.lat, st.lng) })).sort((a, b) => a.m - b.m).slice(0, 8)
+      : [];
+  const locate = () => {
+    if (here && here !== 'locating') return setHere(null); // tap again to hide the nearby list
+    if (!navigator.geolocation) return setHere("This browser can't share your location.");
+    setHere('locating');
+    navigator.geolocation.getCurrentPosition(
+      (p) => setHere({ lat: p.coords.latitude, lng: p.coords.longitude }),
+      (e) => setHere(e.code === 1 ? 'Location is blocked. Allow it for this site in your browser settings.' : "Couldn't find your location. Try again outdoors."),
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 });
+  };
   const savedCodes = saved.map((st) => st.code);
   const isSaved = (code) => saved.find((st) => st.code === code);
   const visibleCodes = openCode && !isSaved(openCode) ? [openCode, ...savedCodes] : savedCodes;
@@ -444,14 +463,20 @@ function BusPage() {
         <MagnifyingGlass size={20} weight="bold" color={C.ink} />
         <TextInput style={s.searchInput} value={query} onChangeText={setQuery} accessibilityLabelledBy="searchLabel"
           placeholder="Code or name, e.g. 09047" placeholderTextColor={C.grey} />
+        <IconBtn label="Stops near me" size={36} active={here && here !== 'locating' && typeof here !== 'string'} onPress={locate}>
+          <Crosshair size={20} weight="bold" color={here?.lat != null ? C.paper : C.ink} />
+        </IconBtn>
       </View>
+      {!q && here === 'locating' && <Text style={s.caption}>Finding stops near you...</Text>}
+      {!q && typeof here === 'string' && here !== 'locating' && <Text style={s.caption}>{here}</Text>}
+      {!q && here?.lat != null && results.length > 0 && <Text style={s.label}>Nearby</Text>}
       {stops === null && q !== '' && <Text style={s.caption}>Loading stops...</Text>}
       {stops?.length === 0 && <Text style={s.caption}>Couldn't load the stop list. Check your connection and reopen the app.</Text>}
       {stops?.length > 0 && q !== '' && !results.length && <Text style={s.caption}>No stops match "{query}".</Text>}
       {results.map((st) => (
-        <Btn key={st.code} onPress={() => { setOpenCode(st.code); setQuery(''); }}>
+        <Btn key={st.code} onPress={() => { setOpenCode(st.code); setQuery(''); setHere(null); }}>
           <Text style={s.label}>{st.name}</Text>
-          <Text style={s.caption}>{st.code} · {st.road}</Text>
+          <Text style={s.caption}>{st.code} · {st.road}{st.m != null && ` · ${st.m < 1000 ? `${st.m} m` : `${(st.m / 1000).toFixed(1)} km`}`}</Text>
         </Btn>
       ))}
 
