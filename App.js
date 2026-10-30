@@ -423,9 +423,16 @@ function BusPage() {
     c.h += heightOf(st.code) + GAP;
   });
 
+  // full-width tiles shrink their bars a little (to 80% at most) so all their buses fit one row
+  const kFor = (code, tileW) => {
+    const n = barsOf(code);
+    if (tileW < inner || n < 2) return k;
+    const fit = (tileW - CARD_PAD) / (n * BAR_SLOT - BAR_GAP);
+    return fit >= k ? k : fit >= 0.8 * k ? fit : k;
+  };
   const card = (code, stop, i, tileW = widthOf(code)) => (
     <StopCard key={code} code={code} stop={stop} color={CARD_COLORS[i % CARD_COLORS.length]}
-      services={servicesAt(code)} saved={isSaved(code)} tileW={tileW} k={k}
+      services={servicesAt(code)} saved={isSaved(code)} tileW={tileW} k={kFor(code, tileW)}
       onToggleStop={() => toggleStop(code, stop)} onToggleService={(no) => toggleService(code, no)} />
   );
   const openStop = openCode && !isSaved(openCode) && stops?.find((st) => st.code === openCode);
